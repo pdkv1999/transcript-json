@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Transcript → Schema Extractor</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>body{padding:20px}.monosmall{font-family:monospace;font-size:0.9rem}</style>
+</head>
+<body>
+  <div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3>Transcript → Schema (XLSX / CSV) Extractor</h3>
+      <small class="text-muted">Local tool</small>
+    </div>
+    <div class="card mb-4">
+      <div class="card-body">
+        <p class="card-text text-muted">
+          Upload a transcript file (<code>.txt</code>, <code>.odt</code>, <code>.docx</code>) and a schema file (<code>.xlsx</code> or <code>.csv</code>).
+          The app will write a filled output to the <code>data/</code> folder. Use "Use LLM" to attempt Gemini extraction (requires <code>GEMINI_API_KEY</code> and network access).
+        </p>
+        <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+          <div class="mb-3">
+            <label class="form-label">Transcript file</label>
+            <input class="form-control" type="file" name="transcript" accept=".txt,.odt,.docx" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Schema file</label>
+            <input class="form-control" type="file" name="schema" accept=".xlsx,.csv" required>
+            <div class="form-text">We will use column titled <code>possible parent-friendly question</code> if present; otherwise the first non-empty column. Tier-6 detection is automatic.</div>
+          </div>
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" name="use_llm" id="use_llm">
+            <label class="form-check-label" for="use_llm">Use LLM (Gemini)</label>
+          </div>
+          <button class="btn btn-primary" type="submit">Upload &amp; Process</button>
+          <a class="btn btn-outline-secondary ms-2" href="{{ url_for('index') }}">Reset</a>
+        </form>
+      </div>
+    </div>
+    <div class="mb-3">
+      <h5>Recent outputs (data/)</h5>
+      {% if outputs %}
+        <ul class="list-group">
+          {% for f in outputs %}
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <a href="{{ url_for('download', fname=f) }}">{{ f }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted">No outputs yet.</p>
+      {% endif %}
+    </div>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="mt-3">
+          {% for m in messages %}
+            <div class="alert alert-info">{{ m }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    <footer class="mt-4 text-muted small">
+      <div>Tips: ensure <code>GEMINI_API_KEY</code> and proxy vars are exported in the same shell you run the app from.</div>
+    </footer>
+  </div>
+</body>
+</html>
