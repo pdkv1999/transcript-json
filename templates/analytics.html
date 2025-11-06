@@ -1,0 +1,309 @@
+<!-- templates/analytics.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ header.get('report_title', 'Analytics Report') }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --ink: #111827; --muted: #4b5563; --line: #e5e7eb;
+      --hi: #dc2626; --some: #f59e0b; --no: #10b981;
+      --bg: #ffffff; --card: #ffffff;
+      --warn: #fef3c7; --err: #fee2e2; --ok: #ecfdf5;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; line-height: 1.4; }
+    .container { max-width: 900px; margin: 24px auto 64px; padding: 24px; background: var(--card);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.1); border-radius: 12px; }
+    header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 0.2px; }
+    header p { margin: 0; color: var(--muted); }
+    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 16px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
+    .meta div span { color: var(--muted); }
+    .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 20px; position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10; }
+    button { border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+    button.primary { background: #111827; color: #fff; border-color: #111827; }
+    .section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .section h2 { font-size: 18px; margin: 0 0 8px; }
+    .status { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; margin: 8px 0 12px; display: none; }
+    .status.show { display: block; } .status.ok { background: var(--ok); } .status.err { background: var(--err); }
+    .summary { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line); border-radius: 10px; padding: 12px; font-size: 15px; min-height: 56px; }
+    .quote { color: var(--muted); font-style: italic; margin-top: 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .chip { border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff; }
+    .chip.hi { background: var(--hi); } .chip.some { background: var(--some); } .chip.no { background: var(--no); }
+    .domains { display: grid; gap: 12px; }
+    .domain-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; }
+    .domain-title { font-weight: 600; margin: 0 0 6px; }
+    .domain-badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; }
+    .badge-hi { background: var(--hi); } .badge-some { background: var(--some); } .badge-no { background: var(--no); }
+    .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+    .skeleton { position: relative; overflow: hidden; background: #f3f4f6; border-radius: 8px; height: 14px; }
+    .skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,.6) 50%, rgba(255,255,255,0) 100%); animation: shimmer 1.3s infinite; }
+    @keyframes shimmer { 100% { transform: translateX(100%);} }
+    @media print { html, body { background: #fff; } .toolbar, .status { display: none !important; } .container { box-shadow: none; margin: 0; border-radius: 0; } @page { size: A4; margin: 16mm; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  </style>
+</head>
+<body>
+  <div class="container" id="report-root">
+    <header>
+      <h1 id="report-title">{{ header.get('report_title', 'Analytics Report') }}</h1>
+      <p>Parent Telephone Interview Summary</p>
+      <div class="meta" id="meta">
+        <div><span>Child Name:</span> <b id="child-name">{{ header.get('child_name', '—') }}</b></div>
+        <div><span>Age:</span> <b id="child-age">{{ header.get('child_age', '—') }}</b></div>
+        <div><span>Date of Interview:</span> <b id="doi">{{ header.get('date_of_interview', '—') }}</b></div>
+        <div><span>Parent Respondent:</span> <b id="parent">{{ header.get('parent_respondent', '—') }}</b></div>
+        <div><span>Interviewer:</span> <b id="interviewer">{{ header.get('interviewer', '—') }}</b></div>
+        <div><span>Referral Source:</span> <b id="ref-source">{{ header.get('referral_source', '—') }}</b></div>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <button id="regen">Regenerate insights</button>
+      <button id="save" class="primary">Save Report</button>
+      <button id="print">Print Report</button>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <section class="section">
+      <h2>Summary of Key Findings</h2>
+      <div id="summary" class="summary">
+        <div class="skeleton" style="width:60%; height:14px; margin-bottom:6px;"></div>
+        <div class="skeleton" style="width:40%; height:14px;"></div>
+      </div>
+      <div id="parent-quote" class="quote"></div>
+    </section>
+
+    <section class="section">
+      <h2>Traffic-Light Summary of Concerns</h2>
+      <div><b>High Concerns:</b> <span id="tl-high"></span></div>
+      <div style="margin-top:6px;"><b>Some Concerns:</b> <span id="tl-some"></span></div>
+      <div style="margin-top:6px;"><b>No Concerns:</b> <span id="tl-no"></span></div>
+      <div class="chips" id="chips-hi" style="margin-top:8px;"></div>
+      <div class="chips" id="chips-some" style="margin-top:6px;"></div>
+      <div class="chips" id="chips-no" style="margin-top:6px;"></div>
+    </section>
+
+    <section class="section">
+      <h2>Recommendations and Next Steps (Based on Parent Concerns)</h2>
+      <ul id="recs" style="margin:0; padding-left:20px;"></ul>
+    </section>
+
+    <section class="section">
+      <h2>Page 2 – Domain-Specific Notes & Quotes</h2>
+      <div class="domains" id="domains"></div>
+    </section>
+
+    <div class="foot">
+      <div>
+        This summary is based on a parent telephone interview and is for discussion purposes only.
+        It does not replace a full clinical assessment.
+      </div>
+      <div id="stamp"></div>
+    </div>
+  </div>
+
+  <script>
+    const sessionId = "{{ session_id }}";
+    const regenBtn = document.getElementById('regen');
+    const saveBtn  = document.getElementById('save');
+    const printBtn = document.getElementById('print');
+
+    const statusEl = document.getElementById('status');
+    const stampEl = document.getElementById('stamp');
+
+    const summaryEl = document.getElementById('summary');
+    const quoteEl = document.getElementById('parent-quote');
+
+    const tlHighEl = document.getElementById('tl-high');
+    const tlSomeEl = document.getElementById('tl-some');
+    const tlNoEl = document.getElementById('tl-no');
+
+    const chipsHi = document.getElementById('chips-hi');
+    const chipsSome = document.getElementById('chips-some');
+    const chipsNo = document.getElementById('chips-no');
+
+    const recsEl = document.getElementById('recs');
+    const domainsEl = document.getElementById('domains');
+
+    function showStatus(msg, type="ok") {
+      statusEl.textContent = msg;
+      statusEl.className = `status show ${type}`;
+    }
+    function clearStatus() { statusEl.className = "status"; statusEl.textContent = ""; }
+    function setStamp() {
+      const dt = new Date();
+      stampEl.textContent = "Last generated: " +
+        dt.toLocaleDateString(undefined, {year:"numeric", month:"short", day:"2-digit"}) + " " +
+        dt.toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit"});
+    }
+
+    function parseList(value) {
+      if (!value) return [];
+      const raw = String(value).split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+      // de-dup while preserving order
+      const seen = new Set(); const out = [];
+      for (const s of raw) { if (!seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); } }
+      return out;
+    }
+
+    function chip(text, cls) { const d = document.createElement('div'); d.className = `chip ${cls}`; d.textContent = text; return d; }
+
+    function renderTrafficLights(rows) {
+      const hi = parseList(rows?.traffic_high?.value);
+      const some = parseList(rows?.traffic_some?.value);
+      const no = parseList(rows?.traffic_no?.value);
+
+      tlHighEl.textContent = hi.join(", ") || "—";
+      tlSomeEl.textContent = some.join(", ") || "—";
+      tlNoEl.textContent = no.join(", ") || "—";
+
+      chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
+      hi.forEach(x => chipsHi.appendChild(chip(x, "hi")));
+      some.forEach(x => chipsSome.appendChild(chip(x, "some")));
+      no.forEach(x => chipsNo.appendChild(chip(x, "no")));
+    }
+
+    function domainSpec() {
+      return [
+        ["Attention / ADHD", "domain_attention_adhd"],
+        ["Learning / Dyslexia", "domain_learning_dyslexia"],
+        ["Sleep", "domain_sleep"],
+        ["Motor Skills", "domain_motor_skills"],
+        ["Anxiety / Emotion", "domain_anxiety_emotion"],
+        ["Social / Communication", "domain_social_communication"],
+        ["Eating", "domain_eating"],
+      ];
+    }
+
+    function levelBadgeText(text) {
+      const t = (text || "").toLowerCase();
+      if (t.includes("high")) return "high";
+      if (t.includes("some")) return "some";
+      if (t.includes("no")) return "no";
+      return "some";
+    }
+
+    function badge(level) {
+      const span = document.createElement('span');
+      span.className = "domain-badge " + (level === "high" ? "badge-hi" : level === "some" ? "badge-some" : "badge-no");
+      span.textContent = level === "high" ? "High concern" : level === "some" ? "Some concern" : "No concern";
+      return span;
+    }
+
+    function renderDomains(rows) {
+      domainsEl.innerHTML = "";
+      for (const [title, key] of domainSpec()) {
+        const obj = rows[key] || {};
+        const card = document.createElement('div');
+        card.className = "domain-card";
+
+        const h = document.createElement('div');
+        h.className = "domain-title";
+        h.textContent = title;
+        // Infer level from value text keywords; if you want you can encode level explicitly in value.
+        const level = levelBadgeText(obj.value || "");
+        h.appendChild(badge(level));
+        card.appendChild(h);
+
+        if (obj.value) {
+          const p = document.createElement('div');
+          p.textContent = String(obj.value);
+          card.appendChild(p);
+        }
+        if (obj.quote) {
+          const q = document.createElement('div');
+          q.className = "quote";
+          q.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
+          card.appendChild(q);
+        }
+
+        domainsEl.appendChild(card);
+      }
+    }
+
+    function renderRecommendations(rows) {
+      recsEl.innerHTML = "";
+      const items = parseList(rows?.recommendations?.value);
+      items.forEach(line => {
+        const li = document.createElement('li');
+        li.textContent = line;
+        recsEl.appendChild(li);
+      });
+    }
+
+    async function regenerate() {
+      clearStatus();
+      summaryEl.innerHTML = `
+        <div class="skeleton" style="width:60%; height:14px; margin-bottom:6px;"></div>
+        <div class="skeleton" style="width:40%; height:14px;"></div>
+      `;
+      quoteEl.textContent = "";
+      recsEl.innerHTML = "";
+      domainsEl.innerHTML = "";
+      chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
+      tlHighEl.textContent = tlSomeEl.textContent = tlNoEl.textContent = "—";
+
+      let res, data;
+      try {
+        res = await fetch(`/api/analytics/${encodeURIComponent(sessionId)}`);
+      } catch (e) {
+        console.error("Network error:", e);
+        showStatus("Network error while calling analytics API.", "err");
+        summaryEl.textContent = "Network error calling analytics API.";
+        return;
+      }
+      try {
+        data = await res.json();
+      } catch (e) {
+        console.error("Bad JSON from API:", e);
+        showStatus("Analytics API returned non-JSON response.", "err");
+        summaryEl.textContent = "Invalid response from analytics API.";
+        return;
+      }
+
+      if (!data || !data.ok) {
+        console.error("Analytics API error:", data);
+        const msg = (data && data.error) ? data.error : "Unknown LLM failure";
+        showStatus("Error: " + msg, "err");
+        summaryEl.textContent = "Error: " + msg;
+        return;
+      }
+
+      // Header refresh (if needed)
+      const h = data.header || {};
+      document.getElementById("child-name").textContent = h.child_name || "—";
+      document.getElementById("child-age").textContent = h.child_age || "—";
+      document.getElementById("doi").textContent = h.date_of_interview || "—";
+      document.getElementById("parent").textContent = h.parent_respondent || "—";
+      document.getElementById("interviewer").textContent = h.interviewer || "—";
+      document.getElementById("ref-source").textContent = h.referral_source || "—";
+      if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
+
+      const rows = data.rows || {};
+      summaryEl.textContent = rows?.summary_overview?.value || "—";
+      if (rows?.parent_quote?.quote || rows?.parent_quote?.value) {
+        const q = rows.parent_quote.quote || rows.parent_quote.value;
+        quoteEl.textContent = 'Parent Quote: “' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
+      } else {
+        quoteEl.textContent = "";
+      }
+
+      renderTrafficLights(rows);
+      renderRecommendations(rows);
+      renderDomains(rows);
+      setStamp();
+      showStatus("Insights generated successfully.", "ok");
+    }
+
+    regenBtn.addEventListener('click', regenerate);
+    printBtn.addEventListener('click', () => window.print());
+    saveBtn.addEventListener('click', () => window.print()); // Save as PDF via system dialog
+
+    // Load once on entry
+    regenerate();
+  </script>
+</body>
+</html>
