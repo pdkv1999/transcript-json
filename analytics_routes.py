@@ -1,6 +1,7 @@
 # analytics_routes.py
 import csv
 import json
+import logging
 import re
 from pathlib import Path
 from datetime import datetime
@@ -28,6 +29,7 @@ CANONICAL_KEYS = [
     "domain_eating",
 ]
 
+# Friendly labels for ordering / display
 DOMAIN_CANON = [
     "Attention / ADHD",
     "Learning / Dyslexia",
@@ -44,26 +46,40 @@ def _empty_row() -> Dict[str, Any]:
 # ----------------------- File discovery and readers -----------------------
 
 def _find_filled_file_for_session(session_id: str) -> Optional[Path]:
+    """
+    Find the best candidate filled file for the session.
+    Search order:
+      1) data/<session_id>/*_filled.*
+      2) data/*<session_id>*_filled.*
+      3) any *_filled.* in data/
+    """
     session_dir = DATA_ROOT / session_id
     candidates: List[Path] = []
     if session_dir.exists() and session_dir.is_dir():
         for p in session_dir.iterdir():
             if p.is_file() and "_filled" in p.name:
                 candidates.append(p)
+    # fallback: filename contains session id
     for p in DATA_ROOT.glob(f"*{session_id}*_filled.*"):
         if p.is_file():
             candidates.append(p)
+    # final fallback: any filled file
     if not candidates:
         for p in DATA_ROOT.glob("*_filled.*"):
             if p.is_file():
                 candidates.append(p)
     if not candidates:
+        current_app.logger.warning("Analytics: no filled candidates found in data/ for session %s", session_id)
         return None
+
+    # prefer csv, then xlsx, then json
     order = [".csv", ".xlsx", ".json", ".xls"]
     for ext in order:
         for c in candidates:
             if c.suffix.lower() == ext:
+                current_app.logger.info("Analytics: chosen filled file %s (preferred ext %s)", c, ext)
                 return c
+    current_app.logger.info("Analytics: chosen filled file %s (fallback)", candidates[0])
     return candidates[0]
 
 def _read_csv_filled(path: Path) -> List[Dict[str, Any]]:
@@ -87,6 +103,7 @@ def _read_csv_filled(path: Path) -> List[Dict[str, Any]]:
     with path.open(newline="", encoding="utf-8", errors="replace") as fh:
         reader = _csv.DictReader(fh, delimiter=delimiter)
         for r in reader:
+            # normalize keys to lowercase no-surrounding-spaces
             low = { (k or "").strip().lower(): (v if v is not None else "") for k, v in r.items() }
             rows.append(low)
     return rows
@@ -106,7 +123,12 @@ def _read_json_filled(path: Path) -> List[Dict[str, Any]]:
             out.append(rec)
         return out
     if isinstance(data, list):
-        return data
+        # Make lowercased-key dicts similar to CSV reader style
+        out = []
+        for item in data:
+            if isinstance(item, dict):
+                out.append({ (k or "").strip().lower(): (v if v is not None else "") for k, v in item.items() })
+        return out
     return []
 
 def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
@@ -133,43 +155,72 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
 # ----------------------- Mapping helpers -----------------------
 
 def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Convert row-list (from CSV/JSON/XLSX) into a dict keyed by a normalized key.
+    Attempts many alternate name matches for 'row_key','label','value','quote','confidence','frequency'.
+    Normalizes empty strings to None and confidence to float.
+    """
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
+        # r might already be lowercased keys from CSV reader; otherwise normalize
+        rec = { (k or "").strip().lower(): v for k, v in r.items() } if isinstance(r, dict) else {}
         def get_any(*names):
             for n in names:
-                if n in r and r[n] not in (None, ""):
-                    return r[n]
+                if n is None:
+                    continue
+                n = n.strip().lower()
+                if n in rec and rec[n] not in (None, ""):
+                    return rec[n]
             return None
-        row_key = get_any("row_key", "key", "row", "rowlabel", "row_label", "row label")
-        row_label = get_any("row_label", "label", "rowlabel", "row label")
-        value = get_any("value", "answer", "filled_value", "response", "result", "frequency")
-        quote = get_any("quote", "evidence", "supporting_quote", "support")
+
+        # Try common candidates for key
+        row_key = get_any("row_key", "key", "row", "rowlabel", "row_label", "row label", "id")
+        row_label = get_any("row_label", "label", "rowlabel", "row label", "question", "question_text", "possible parent-friendly question")
+        # value could be named many ways
+        value = get_any("value", "answer", "filled_value", "response", "result", "frequency", "frequency_code", "frequency_code_value", "value_text")
+        quote = get_any("quote", "evidence", "supporting_quote", "support", "quote_text")
         conf = get_any("confidence", "conf", "score", "certainty")
+        # If no explicit row_key, try to generate from label
         if not row_key and row_label:
             row_key = str(row_label).strip().lower().replace(" ", "_")
-        if isinstance(conf, str):
-            try:
-                conf_num = float(conf.strip())
-            except Exception:
-                conf_num = 0.0
-        elif isinstance(conf, (int, float)):
-            conf_num = float(conf)
-        else:
-            conf_num = 0.0
-        key = str(row_key) if row_key else (str(row_label).strip().lower().replace(" ", "_") if row_label else None)
-        if not key:
+        if not row_key:
+            # fallback: try some known keys in the original dict
+            for possible in rec.keys():
+                if possible and ("row" in possible or "key" in possible or "label" in possible):
+                    row_key = possible
+                    break
+        if not row_key:
+            # hopeless; skip
             continue
-        val_s = None if value is None or (isinstance(value, str) and value.strip() == "") else value
-        quote_s = None if quote is None or (isinstance(quote, str) and quote.strip() == "") else quote
-        out[key] = {"value": val_s, "quote": quote_s, "confidence": conf_num}
+
+        # Normalize empty strings -> None
+        val_s = None if value in (None, "") else value
+        quote_s = None if quote in (None, "") else quote
+        # Normalize confidence
+        conf_num = 0.0
+        if conf is not None and conf != "":
+            try:
+                conf_num = float(conf)
+            except Exception:
+                try:
+                    # common forms like "0.8" or "80%"
+                    if isinstance(conf, str) and "%" in conf:
+                        conf_num = float(conf.replace("%", "")) / 100.0
+                    else:
+                        conf_num = float(str(conf))
+                except Exception:
+                    conf_num = 0.0
+
+        key = str(row_key).strip().lower()
+        out[key] = {"value": val_s, "quote": quote_s, "confidence": conf_num, "row_label": (row_label or None)}
     return out
 
-# ----------------------- Traffic-light logic (FIXED) -----------------------
+# ----------------------- Traffic-light logic -----------------------
 
 def _classify_frequency_to_level(value: Optional[str]) -> str:
     """
     Map a frequency-style string to 'hi'|'some'|'no'
-    Important: DEFAULT -> 'no' (if value missing/empty)
+    Default -> 'no' (conservative)
     """
     if value is None:
         return "no"
@@ -177,41 +228,51 @@ def _classify_frequency_to_level(value: Optional[str]) -> str:
     if s == "" or s in ("na", "n/a", "none"):
         return "no"
     # explicit no
-    if any(x in s for x in ("no", "never")):
+    if any(x in s for x in ("no", "never", "not")):
         return "no"
     # hi
-    if any(x in s for x in ("a lot", "alot", "always", "frequent", "often", "many")):
+    if any(x in s for x in ("a lot", "alot", "always", "frequent", "often", "many", "daily", "regularly", "constant")):
         return "hi"
     # some
-    if any(x in s for x in ("some", "just some", "occasionally", "sometimes")):
+    if any(x in s for x in ("some", "just some", "occasionally", "sometimes", "sometimes", "occasional")):
         return "some"
-    # fallback: no (conservative)
+    # fallback conservative
     return "no"
 
 def _domain_label_from_row_key(rk: str) -> str:
     s = rk.replace("_", " ").lower()
+    # Direct match if canonical token in key
+    tokens = s.split()
     for canon in DOMAIN_CANON:
-        if any(tok in canon.lower() for tok in s.split()):
+        canon_low = canon.lower()
+        # if at least one token from canonical matches
+        if any(tok in canon_low for tok in tokens) or any(tok in canon_low for tok in s.split("/")):
             return canon
-    if "att" in s or "adhd" in s:
+    # heuristic checks
+    if "att" in s or "adhd" in s or "attention" in s:
         return "Attention / ADHD"
-    if "learn" in s or "dyslex" in s:
+    if "learn" in s or "dyslex" in s or "school" in s:
         return "Learning / Dyslexia"
-    if "sleep" in s:
+    if "sleep" in s or "bed" in s:
         return "Sleep"
-    if "motor" in s:
+    if "motor" in s or "coord" in s:
         return "Motor Skills"
-    if "anx" in s or "emotion" in s:
+    if "anx" in s or "emotion" in s or "mood" in s:
         return "Anxiety / Emotion"
-    if "social" in s or "commun" in s:
+    if "social" in s or "commun" in s or "friend" in s:
         return "Social / Communication"
-    if "eat" in s:
+    if "eat" in s or "feeding" in s or "meals" in s:
         return "Eating"
+    # fallback title-cased
     return rk.replace("_", " ").title()
 
 # ----------------------- High-level loader -----------------------
 
 def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, Any]], Optional[Path]]:
+    """
+    Read the filled file and return a normalized dictionary of canonical keys -> {value,quote,confidence}
+    Also returns the Path used (or None).
+    """
     p = _find_filled_file_for_session(session_id)
     if not p:
         return {}, None
@@ -229,41 +290,94 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
     except Exception as e:
         current_app.logger.exception("Analytics: failed to read filled file %s: %s", p, e)
         return {}, p
+
     mapped = _map_row_list_to_dict(rows_list)
+
+    # Build normalized output for canonical keys.
     normalized: Dict[str, Dict[str, Any]] = {}
+    # first try direct keys
     for k in CANONICAL_KEYS:
         if k in mapped:
-            normalized[k] = mapped[k]; continue
-        found = None
-        for mk in mapped.keys():
-            if k in mk:
-                found = mk; break
-        if found:
-            normalized[k] = mapped[found]; continue
-        words = k.replace("_", " ").split()
-        best = None
-        for mk in mapped.keys():
-            if all(w.lower() in mk.lower() for w in words[:2]):
-                best = mk; break
-        if best:
-            normalized[k] = mapped[best]; continue
-        normalized[k] = _empty_row()
+            # ensure safe shape
+            rec = mapped[k]
+            normalized[k] = {
+                "value": rec.get("value"),
+                "quote": rec.get("quote"),
+                "confidence": float(rec.get("confidence") or 0.0)
+            }
+        else:
+            normalized[k] = None
+
+    # Now try fuzzy matching for canonical keys from mapped keys
+    for mk, rec in mapped.items():
+        # skip keys already placed
+        placed = False
+        # common domain keys: if mk contains domain words, map to domain_...
+        for canon_k in CANONICAL_KEYS:
+            if canon_k.startswith("domain_"):
+                # derive expected domain text
+                domain_label = canon_k.replace("domain_", "").replace("_", " ").strip()
+                # if mapped row_label contains domain words OR mk contains domain tokens -> place it
+                row_label = rec.get("row_label") or ""
+                combined = " ".join([mk, str(row_label or "")]).lower()
+                token_match = all(tok in combined for tok in domain_label.split()[:1])  # at least one token
+                # also use more robust heuristics
+                if any(word in combined for word in domain_label.split()):
+                    normalized_key = canon_k
+                    if normalized.get(normalized_key) in (None,):
+                        normalized[normalized_key] = {
+                            "value": rec.get("value"),
+                            "quote": rec.get("quote"),
+                            "confidence": float(rec.get("confidence") or 0.0)
+                        }
+                        placed = True
+                        break
+        if placed:
+            continue
+
+        # Generic placements: map keys if they match summary/parent_quote/recommendations/traffic_*
+        lowmk = mk.lower()
+        if any(tok in lowmk for tok in ("summary", "overview")) and normalized.get("summary_overview") in (None,):
+            normalized["summary_overview"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+        if any(tok in lowmk for tok in ("parent", "parent_quote", "parent-quote", "parent quote", "short_quote")) and normalized.get("parent_quote") in (None,):
+            normalized["parent_quote"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+        if "recommend" in lowmk and normalized.get("recommendations") in (None,):
+            normalized["recommendations"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+        if "traffic" in lowmk and normalized.get("traffic_high") in (None,) and "high" in lowmk:
+            normalized["traffic_high"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+        if "traffic" in lowmk and normalized.get("traffic_some") in (None,) and "some" in lowmk:
+            normalized["traffic_some"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+        if "traffic" in lowmk and normalized.get("traffic_no") in (None,) and ("no" in lowmk or "none" in lowmk):
+            normalized["traffic_no"] = {"value": rec.get("value"), "quote": rec.get("quote"), "confidence": float(rec.get("confidence") or 0.0)}
+            continue
+
+    # Final pass: ensure every canonical key is populated with an object
+    for k in CANONICAL_KEYS:
+        v = normalized.get(k)
+        if v is None:
+            normalized[k] = _empty_row()
+        else:
+            # convert blank strings to None
+            if isinstance(v.get("value"), str) and v.get("value").strip() == "":
+                v["value"] = None
+            if isinstance(v.get("quote"), str) and v.get("quote").strip() == "":
+                v["quote"] = None
+            # ensure confidence numeric
+            try:
+                v["confidence"] = float(v.get("confidence") or 0.0)
+            except Exception:
+                v["confidence"] = 0.0
+
     return normalized, p
 
 # ----------------------- Header extraction -----------------------
 
 def _extract_header_from_transcript(session_id: str) -> Dict[str, str]:
-    """
-    Try lightweight extractions from transcript.txt: child name, age, date, parent, interviewer, referral.
-    Patterns looked for (case-insensitive):
-      - Child Name: <...>
-      - Age: <...>
-      - Date of Interview: <...> or Interview Date: <...>
-      - Parent Respondent: <...>
-      - Interviewer: <...>
-      - Referral Source: <...>
-    Returns partial dict (keys as used in template).
-    """
     base = DATA_ROOT / session_id
     transcript_path = base / "transcript.txt"
     out = {}
@@ -282,10 +396,8 @@ def _extract_header_from_transcript(session_id: str) -> Dict[str, str]:
         m = re.search(pat, txt, flags=re.IGNORECASE)
         if m:
             val = m.group(1).strip()
-            # simple cleanup
             val = re.sub(r"[\r\n]+", " ", val)
             out[key] = val
-    # If date not found, optionally look for common date formats anywhere
     if "date_of_interview" not in out:
         m = re.search(r"([0-9]{1,2}\s+\w+\s+[0-9]{4})", txt)
         if m:
@@ -310,12 +422,10 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
             return header
         except Exception:
             current_app.logger.warning("Failed to parse report_meta.json; falling back to transcript.")
-    # try transcript extraction
     extracted = _extract_header_from_transcript(session_id)
     if extracted:
         header.update({k: v for k, v in extracted.items() if v})
         return header
-    # if none found, try to use the session folder mtime as date
     session_dir = DATA_ROOT / session_id
     if session_dir.exists():
         try:
@@ -334,27 +444,23 @@ def api_generate(session_id):
         current_app.logger.error("Analytics: no filled rows found for session %s (path=%s)", session_id, path_used)
         return jsonify({"ok": False, "error": "Missing filled file or no recognizable rows"}), 400
 
-    traffic_high_vals = None
-    traffic_some_vals = None
-    traffic_no_vals = None
+    # If explicit traffic lists present in rows, use them; otherwise derive from domain rows
+    traffic_high_vals = rows.get("traffic_high", {}).get("value")
+    traffic_some_vals = rows.get("traffic_some", {}).get("value")
+    traffic_no_vals = rows.get("traffic_no", {}).get("value")
 
-    if rows.get("traffic_high", {}).get("value"):
-        traffic_high_vals = rows["traffic_high"]["value"]
-    if rows.get("traffic_some", {}).get("value"):
-        traffic_some_vals = rows["traffic_some"]["value"]
-    if rows.get("traffic_no", {}).get("value"):
-        traffic_no_vals = rows["traffic_no"]["value"]
-
+    # Derive traffic lists from domain rows if not provided
     if not (traffic_high_vals or traffic_some_vals or traffic_no_vals):
         hi = []
         some = []
         no = []
-        for dk in CANONICAL_KEYS:
-            if not dk.startswith("domain_"):
-                continue
-            v = rows.get(dk, {}).get("value")
+        # iterate over canonical domain keys in a stable order
+        for idx, dk in enumerate([k for k in CANONICAL_KEYS if k.startswith("domain_")]):
+            entry = rows.get(dk) or {}
+            v = entry.get("value")
             lvl = _classify_frequency_to_level(v)
-            label = _domain_label_from_row_key(dk)
+            # get human label
+            label = DOMAIN_CANON[idx] if idx < len(DOMAIN_CANON) else _domain_label_from_row_key(dk)
             if lvl == "hi":
                 hi.append(label)
             elif lvl == "some":
@@ -370,19 +476,22 @@ def api_generate(session_id):
             return {"value": None, "quote": None, "confidence": 0.0}
         return {"value": val, "quote": None, "confidence": 1.0}
 
-    rows_out = rows.copy()
+    # Ensure traffic keys exist in output and include quotes if present
+    rows_out = {k: (rows.get(k) or _empty_row()) for k in CANONICAL_KEYS}
     rows_out["traffic_high"] = _wrap(traffic_high_vals)
     rows_out["traffic_some"] = _wrap(traffic_some_vals)
     rows_out["traffic_no"] = _wrap(traffic_no_vals)
 
+    # If recommendations row empty, keep placeholder
     if "recommendations" not in rows_out or not rows_out["recommendations"].get("value"):
         rows_out["recommendations"] = {"value": None, "quote": None, "confidence": 0.0}
 
+    # Persist derived rows for debugging
     try:
         outp = (DATA_ROOT / session_id / "analytics_rows_from_filled.json") if (DATA_ROOT / session_id).exists() else (DATA_ROOT / f"{session_id}_analytics_rows_from_filled.json")
         outp.parent.mkdir(parents=True, exist_ok=True)
         outp.write_text(json.dumps(rows_out, ensure_ascii=False, indent=2), encoding="utf-8")
-        current_app.logger.info("Analytics: wrote derived rows to %s", outp)
+        current_app.logger.info("Analytics: wrote derived rows to %s (from %s)", outp, path_used)
     except Exception as e:
         current_app.logger.warning("Analytics: could not persist derived rows: %s", e)
 
