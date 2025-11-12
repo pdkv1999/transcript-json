@@ -1,7 +1,10 @@
 # analytics_routes.py
 """
-Analytics routes - aggressive domain matching + pure-Python extraction from filled files.
-Replace your existing analytics_routes.py with this file.
+Analytics routes - updated:
+- Produces canonical domain objects with both frequency-based and quote-based metrics.
+- Computes frequency percent using weighted formula (always=2, some=1, never=0).
+- Computes quote shares using unique quote counts (de-duplicated with similarity >=85%).
+- Exposes both traffic lists and domain_scores for both modes.
 """
 import csv
 import json
@@ -11,6 +14,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 
 from flask import Blueprint, jsonify, render_template, current_app
+
+import difflib
 
 analytics_bp = Blueprint("analytics", __name__, template_folder="templates")
 
@@ -52,7 +57,8 @@ DOMAIN_KEYWORDS = {
     "Eating": ["eat", "feeding", "food", "weight", "appetite", "swallow"],
 }
 
-# simple flatten / lower helper
+# ---------------------- helpers ----------------------
+
 def _flatten_cell_value(v) -> str:
     if v is None:
         return ""
@@ -109,7 +115,6 @@ def _read_csv_filled(path: Path) -> List[Dict[str, Any]]:
     with path.open(newline="", encoding="utf-8", errors="replace") as fh:
         reader = _csv.DictReader(fh, delimiter=delimiter)
         for r in reader:
-            # normalize keys to lower, keep original values
             low = { (k or "").strip().lower(): (v if v is not None else "") for k, v in r.items() }
             rows.append(low)
     return rows
@@ -118,8 +123,6 @@ def _read_json_filled(path: Path) -> List[Dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         out = []
-        # Accept both {row_key: {value,..}} and {rows: [...]}
-        # If dict looks like mapping of row_key->object, convert
         is_map = all(isinstance(v, (dict, str, int, float, type(None))) for v in data.values())
         if is_map and not isinstance(next(iter(data.values())), list):
             for rk, v in data.items():
@@ -134,9 +137,6 @@ def _read_json_filled(path: Path) -> List[Dict[str, Any]]:
             return out
         if "rows" in data and isinstance(data["rows"], list):
             return data["rows"]
-        # fallback: try to coerce list if possible
-        if isinstance(data, list):
-            return data
     if isinstance(data, list):
         return data
     return []
@@ -150,7 +150,6 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
     rows = []
-    # read headers
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     headers = [ (str(h).strip().lower() if h is not None else "") for h in header_row ]
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -165,10 +164,6 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
 # ----------------------- Mapping helpers -----------------------
 
 def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Map many possible column names to a canonical dict keyed by row_key.
-    The returned dict entries have {value, quote, confidence}.
-    """
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         def get_any(*names):
@@ -178,7 +173,6 @@ def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
             return None
         row_key = get_any("row_key", "key", "row", "rowlabel", "row_label", "row label")
         row_label = get_any("row_label", "label", "rowlabel", "row label", "possible parent-friendly question", "question")
-        # value can be in many columns - prefer frequency_code or frequency
         value = get_any("value", "answer", "filled_value", "response", "result", "frequency", "frequency_code", "frequency code", "response_code")
         quote = get_any("quote", "evidence", "supporting_quote", "support", "found_quote")
         conf = get_any("confidence", "conf", "score", "certainty")
@@ -195,7 +189,6 @@ def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
             conf_num = 0.0
         key = str(row_key) if row_key else (str(row_label).strip().lower().replace(" ", "_") if row_label else None)
         if not key:
-            # if no identifiable key, create one from first non-empty cell text
             for kk, vv in r.items():
                 if vv not in (None, ""):
                     key = kk.strip().lower() + "_" + str(abs(hash(str(vv))))[:6]
@@ -216,31 +209,18 @@ def _normalize_freq_token(v: Optional[str]) -> Optional[str]:
     s = s.strip()
     if s == "":
         return None
-    # numeric tokens mapping
     if s in ("2", "2.0", "high"):
         return "always"
     if s in ("1", "1.0", "some"):
         return "some"
     if s in ("0", "0.0", "none", "no", "never"):
         return "never"
-    # textual mapping
     if any(x in s for x in ("a lot", "alot", "always", "frequent", "often", "many")):
         return "always"
     if any(x in s for x in ("some", "just some", "occasionally", "sometimes")):
         return "some"
     if any(x in s for x in ("notmuch", "not much", "never", "no", "none")):
         return "never"
-    # explicit words like "always/alot/just some"
-    m = re.search(r"\b(alot|a lot|always|often|frequent)\b", s)
-    if m:
-        return "always"
-    m = re.search(r"\b(some|occasionally|sometimes|just some)\b", s)
-    if m:
-        return "some"
-    m = re.search(r"\b(never|no|not much|notmuch)\b", s)
-    if m:
-        return "never"
-    # fallback: if it contains a digit 2/1/0
     m = re.search(r"\b([0-9])\b", s)
     if m:
         if m.group(1) == "2":
@@ -261,43 +241,29 @@ def _token_weight(tok: Optional[str]) -> int:
 # ----------------------- Domain helpers -----------------------
 
 def _domain_label_from_row_key_or_text(text: str) -> str:
-    """
-    Aggressive mapping: given any label/text snippet, choose the best matching canonical domain.
-    """
     s = _flatten_cell_value(text).lower()
-    # exact keyword heuristics
     for canon, kws in DOMAIN_KEYWORDS.items():
         for kw in kws:
             if kw in s:
                 return canon
-    # fallback: check presence of domain names
     for canon in DOMAIN_CANON:
         if any(tok in canon.lower() for tok in s.split()):
             return canon
-    # last resort: title-case the input
     return text.strip().title() if text else "Unknown"
 
 def _find_domain_rows_in_raw_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Scan every cell of each raw row and collect candidate rows per domain.
-    Returns mapping domain -> list of raw row dicts (original row).
-    """
     domain_candidates: Dict[str, List[Dict[str, Any]]] = {d: [] for d in DOMAIN_CANON}
     for r in rows_list:
-        # Build a combined text from important fields to search
         combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
         combined_text_lower = combined_text.lower()
         assigned = set()
-        # Check keywords for each domain; if any keyword appears, add the row as candidate
         for domain, kws in DOMAIN_KEYWORDS.items():
             for kw in kws:
                 if kw in combined_text_lower:
                     domain_candidates[domain].append(r)
                     assigned.add(domain)
                     break
-        # If none assigned, try to detect using short heuristics (row keys/labels)
         if not assigned:
-            # examine the first few columns' text as fallback
             for k in ("row_key", "row_label", "label", "question", "possible parent-friendly question"):
                 if k in r and r[k]:
                     dom = _domain_label_from_row_key_or_text(str(r[k]))
@@ -306,14 +272,9 @@ def _find_domain_rows_in_raw_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, 
                         break
     return domain_candidates
 
-# ----------------------- High-level loader -----------------------
+# ----------------------- Core loader -----------------------
 
 def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, Any]], Optional[Path], List[Dict[str, Any]]]:
-    """
-    Return (normalized_rows_dict, path_used, raw_row_list).
-    normalized_rows_dict contains canonical CANONICAL_KEYS; domain_* keys will be populated
-    either from explicit keys in the filled file or by matching raw rows aggressively.
-    """
     p = _find_filled_file_for_session(session_id)
     if not p:
         return {}, None, []
@@ -333,19 +294,16 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
         return {}, p, []
     mapped = _map_row_list_to_dict(rows_list)
 
-    # Start with canonical normalized dict (populate with mapped values where available)
     normalized: Dict[str, Dict[str, Any]] = {}
     for k in CANONICAL_KEYS:
         if k in mapped:
             normalized[k] = mapped[k]; continue
-        # try to find close match among mapped keys
         found = None
         for mk in mapped.keys():
             if k in mk:
                 found = mk; break
         if found:
             normalized[k] = mapped[found]; continue
-        # heuristics: search mapped keys for first two words
         words = k.replace("_", " ").split()
         best = None
         for mk in mapped.keys():
@@ -355,10 +313,9 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
             normalized[k] = mapped[best]; continue
         normalized[k] = _empty_row()
 
-    # Aggressive domain matching: scan the raw rows for domain-specific candidates and use best match
+    # domain matching and population of canonical domain_* keys
     domain_candidates = _find_domain_rows_in_raw_rows(rows_list)
 
-    # For each canonical domain key like domain_attention_adhd, try to pick the best candidate row and fill value/quote
     domain_key_map = {
         "domain_attention_adhd": "Attention / ADHD",
         "domain_learning_dyslexia": "Learning / Dyslexia",
@@ -369,32 +326,24 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
         "domain_eating": "Eating",
     }
 
-    # Helper: pick the best candidate row: prefer rows that have explicit frequency/frequency_code/response_code/value columns filled,
-    # then prefer those with quotes/evidence; fallback to the first candidate.
+    # helper pick best candidate (prefers explicit freq/quote)
     def _pick_best_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not cands:
             return None
-        # scoring
         best = None
         best_score = -1
         for r in cands:
             score = 0
-            # presence of freq-like fields
             for fk in ("frequency_code", "frequency code", "frequency", "freq", "response_code", "response code", "value", "answer"):
-                v = None
-                if fk in r:
-                    v = r.get(fk)
+                v = r.get(fk) if fk in r else None
                 if v not in (None, "", []):
                     score += 5
                     break
-            # presence of quote/evidence
-            for qk in ("quote", "evidence", "support", "found_quote"):
+            for qk in ("quote", "evidence", "support", "found_quote", "supporting_quote"):
                 if qk in r and r[qk] not in (None, ""):
                     score += 3
-            # row_label presence
             if any(k in r and r[k] not in (None, "") for k in ("row_label", "label", "question")):
                 score += 1
-            # small heuristic: shorter combined text -> likely a label (not ideal but helps)
             combined = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
             if 10 < len(combined) < 800:
                 score += 1
@@ -403,16 +352,13 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
                 best = r
         return best
 
-    # Use candidates to populate domain keys if they weren't already present
     for dk, domain_name in domain_key_map.items():
-        # If normalized already has a non-empty value for this domain, prefer it
         existing = normalized.get(dk) or {}
         if existing.get("value") not in (None, "") or existing.get("quote") not in (None, ""):
             continue
         cands = domain_candidates.get(domain_name, []) or []
         chosen = _pick_best_candidate(cands)
         if chosen:
-            # try to pick value and quote from many possible columns
             val = None
             quote = None
             for fk in ("frequency_code", "frequency code", "frequency", "freq", "response_code", "response code", "value", "answer"):
@@ -421,13 +367,11 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
             for qk in ("quote", "evidence", "support", "found_quote", "supporting_quote"):
                 if qk in chosen and chosen[qk] not in (None, ""):
                     quote = chosen[qk]; break
-            # as a fallback, use the row_label or first long text cell as "value"
             if val is None:
                 for hk in ("row_label", "label", "question", "possible parent-friendly question"):
                     if hk in chosen and chosen[hk] not in (None, ""):
                         val = chosen[hk]; break
             if quote is None:
-                # search long text cells for sentences (heuristic)
                 long_text = None
                 for v in chosen.values():
                     if v and isinstance(v, str) and len(v) > 30 and len(v) < 1000:
@@ -442,29 +386,46 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
 
     return normalized, p, rows_list
 
+# ----------------------- Unique-quote dedupe -----------------------
+
+def _normalize_quote_text(q: str) -> str:
+    s = q or ""
+    s = s.strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r'[“”"\'\u2018\u2019]', '', s)
+    s = s.lower().strip()
+    return s
+
+def _dedupe_quotes(quotes: List[str], threshold: float = 0.85) -> List[str]:
+    """Dedupe by similarity >= threshold using difflib.SequenceMatcher"""
+    unique = []
+    for q in quotes:
+        nq = _normalize_quote_text(q)
+        if not nq:
+            continue
+        is_dup = False
+        for u in unique:
+            sim = difflib.SequenceMatcher(None, nq, _normalize_quote_text(u)).ratio()
+            if sim >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(q)
+    return unique
+
 # ----------------------- Aggregation / scoring -----------------------
 
 def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Inspect the original rows_list and aggregate frequency counts per domain.
-    Returns dict:
-      { "Attention / ADHD": {"counts": {...}, "weighted_sum": int, "total_count": int,
-                              "percent": float, "share": float }, ... }
-    'percent' = weighted_score / total_count * 100 (local confidence-like metric)
-    'share'   = weighted_score / sum(weighted_scores_all_domains) * 100 (normalized, sums to ~100)
-    """
-    domain_buckets: Dict[str, Dict[str, int]] = {}
-    for d in DOMAIN_CANON:
-        domain_buckets[d] = {"always": 0, "some": 0, "never": 0, "unknown": 0}
+    # Initialize
+    domain_buckets = {d: {"always": 0, "some": 0, "never": 0, "unknown": 0, "quotes": []} for d in DOMAIN_CANON}
 
     domain_candidates = _find_domain_rows_in_raw_rows(rows_list)
 
-    # populate buckets
+    # For every raw row, assign to a domain and update counts & collect quotes
     for r in rows_list:
         combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
         txt_lower = combined_text.lower()
         domain = None
-        # exact keyword detection
         for dom, kws in DOMAIN_KEYWORDS.items():
             for kw in kws:
                 if kw in txt_lower:
@@ -500,13 +461,17 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
 
         norm = _normalize_freq_token(freq_raw)
         if norm is None:
-            domain_buckets.setdefault(domain, {"always": 0, "some": 0, "never": 0, "unknown": 0})
             domain_buckets[domain]["unknown"] += 1
         else:
-            domain_buckets.setdefault(domain, {"always": 0, "some": 0, "never": 0, "unknown": 0})
+            domain_buckets[domain].setdefault(norm, 0)
             domain_buckets[domain][norm] += 1
 
-    # compute weighted sums and local percent (unchanged)
+        # collect quotes if present in any quote-like key
+        for qk in ("quote", "evidence", "support", "found_quote", "supporting_quote"):
+            if qk in r and r[qk] not in (None, ""):
+                domain_buckets[domain]["quotes"].append(str(r[qk]).strip())
+
+    # compute weighted sums and percent (frequency-based) and quote counts
     results: Dict[str, Dict[str, Any]] = {}
     weighted_totals_sum = 0
     for domain, counts in domain_buckets.items():
@@ -518,24 +483,37 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
         percent = 0.0
         if total > 0:
             percent = (weighted_sum / float(total)) * 100.0
+        # dedupe quotes and count
+        quotes = counts.get("quotes", []) or []
+        unique_quotes = _dedupe_quotes(quotes)
+        qcount = len(unique_quotes)
         results[domain] = {
             "counts": {"always": a, "some": s, "never": n, "unknown": counts.get("unknown", 0)},
             "weighted_sum": weighted_sum,
             "total_count": total,
-            "percent": percent,   # local metric (0-100)
-            "share": 0.0          # placeholder, will fill next
+            "percent": percent,    # frequency percent (0-100)
+            "unique_quotes": unique_quotes,
+            "quote_count": qcount,
+            "quote_total_text": " ".join(unique_quotes)
         }
         weighted_totals_sum += weighted_sum
 
-    # Normalize into a share that sums to 100 across domains
+    # compute share for frequency (normalize weighted_sum across domains) and for quotes (normalize quote_count)
     if weighted_totals_sum > 0:
         for domain, info in results.items():
-            share = (float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0
-            info["share"] = share
+            info["freq_share"] = (float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0
     else:
-        # If no weighted counts (no data), keep share as 0.0
         for domain in results:
-            results[domain]["share"] = 0.0
+            results[domain]["freq_share"] = 0.0
+
+    # quote shares
+    total_quote_count = sum(info["quote_count"] for info in results.values())
+    if total_quote_count > 0:
+        for domain, info in results.items():
+            info["quote_share"] = (float(info["quote_count"]) / float(total_quote_count)) * 100.0
+    else:
+        for domain in results:
+            results[domain]["quote_share"] = 0.0
 
     return results
 
@@ -623,70 +601,139 @@ def api_generate(session_id):
         current_app.logger.error("Analytics: no filled rows found for session %s (path=%s)", session_id, path_used)
         return jsonify({"ok": False, "error": "Missing filled file or no recognizable rows"}), 400
 
-    # If the uploaded filled file explicitly contained traffic_high/some/no, respect those first
-    traffic_high_vals = None
-    traffic_some_vals = None
-    traffic_no_vals = None
-
-    if rows.get("traffic_high", {}).get("value"):
-        traffic_high_vals = rows["traffic_high"]["value"]
-    if rows.get("traffic_some", {}).get("value"):
-        traffic_some_vals = rows["traffic_some"]["value"]
-    if rows.get("traffic_no", {}).get("value"):
-        traffic_no_vals = rows["traffic_no"]["value"]
-
-    # Compute domain-level scores by scanning the filled rows
+    # Compute aggregates from raw rows
     agg = _aggregate_domain_weights_from_rows(raw_rows_list)
-    domain_scores_map = { domain: (agg.get(domain, {}).get("share", 0.0) or 0.0) for domain in DOMAIN_CANON }
 
+    # Build canonical domain objects with both frequency (percent) and quote metrics
+    domain_objects: Dict[str, Dict[str, Any]] = {}
+    for domain in DOMAIN_CANON:
+        info = agg.get(domain, {})
+        # choose a representative value/quote if present in provided rows (rows map)
+        # attempt to find any explicit mapped normalized domain entry in `rows` (domain_* keys)
+        # fallback to derived info
+        rep_val = None
+        rep_quote = None
+        # try normalized rows mapping (rows keys)
+        for k, v in rows.items():
+            if not k.startswith("domain_"):
+                continue
+            # match by label
+            if domain.lower().replace(" ", "_") in k:
+                rep = v or {}
+                rep_val = rep.get("value") or rep_val
+                rep_quote = rep.get("quote") or rep_quote
+        # fallback to first unique quote if no rep_quote
+        if not rep_quote and info.get("unique_quotes"):
+            rep_quote = info["unique_quotes"][0] if len(info["unique_quotes"]) > 0 else None
+        # fallback to any text in rows (value)
+        if not rep_val:
+            # try to infer from non-domain canonical keys (summary, parent_quote etc.)
+            rep_val = None
+        domain_objects[domain] = {
+            "value": rep_val,
+            "quote": rep_quote,
+            "confidence": 1.0 if (rep_val or rep_quote) else 0.0,
+            "freq_percent": info.get("percent", 0.0),
+            "freq_share": info.get("freq_share", 0.0),
+            "quote_count": info.get("quote_count", 0),
+            "quote_share": info.get("quote_share", 0.0),
+            "unique_quotes": info.get("unique_quotes", [])
+        }
+
+    # Derive traffic lists for frequency and for quotes
+    traffic_freq_hi = []
+    traffic_freq_some = []
+    traffic_freq_no = []
+
+    traffic_quote_hi = []
+    traffic_quote_some = []
+    traffic_quote_no = []
+
+    for domain, dobj in domain_objects.items():
+        p = dobj.get("freq_percent", 0.0)
+        lvl = _percent_to_level(p)
+        if lvl == "hi":
+            traffic_freq_hi.append(domain)
+        elif lvl == "some":
+            traffic_freq_some.append(domain)
+        else:
+            traffic_freq_no.append(domain)
+
+        qs = dobj.get("quote_share", 0.0)
+        lvl_q = _percent_to_level(qs)
+        if lvl_q == "hi":
+            traffic_quote_hi.append(domain)
+        elif lvl_q == "some":
+            traffic_quote_some.append(domain)
+        else:
+            traffic_quote_no.append(domain)
+
+    # Build rows_out canonical map (keep original rows for non-domain keys)
+    rows_out = {}
+    # copy existing canonical keys
+    for k in CANONICAL_KEYS:
+        rows_out[k] = rows.get(k, _empty_row())
+
+    # Insert domain_* canonical objects
+    for domain_key, domain_name in {
+        "domain_attention_adhd": "Attention / ADHD",
+        "domain_learning_dyslexia": "Learning / Dyslexia",
+        "domain_sleep": "Sleep",
+        "domain_motor_skills": "Motor Skills",
+        "domain_anxiety_emotion": "Anxiety / Emotion",
+        "domain_social_communication": "Social / Communication",
+        "domain_eating": "Eating",
+    }.items():
+        dobj = domain_objects.get(domain_name, {})
+        # fill a JSON-serializable object
+        rows_out[domain_key] = {
+            "value": dobj.get("value"),
+            "quote": dobj.get("quote"),
+            "confidence": dobj.get("confidence", 0.0),
+            "freq_percent": dobj.get("freq_percent", 0.0),
+            "freq_share": dobj.get("freq_share", 0.0),
+            "quote_count": dobj.get("quote_count", 0),
+            "quote_share": dobj.get("quote_share", 0.0),
+        }
+
+    # Provide traffic lists both as arrays (client handles arrays) and string for backwards compatibility
+    def _to_wrap_list(arr):
+        if not arr:
+            return {"value": None, "quote": None, "confidence": 0.0, "list": [], "text": None}
+        return {"value": ", ".join(arr), "quote": None, "confidence": 1.0, "list": arr, "text": ", ".join(arr)}
+
+    rows_out["traffic_freq_high"] = _to_wrap_list(traffic_freq_hi)
+    rows_out["traffic_freq_some"] = _to_wrap_list(traffic_freq_some)
+    rows_out["traffic_freq_no"] = _to_wrap_list(traffic_freq_no)
+
+    rows_out["traffic_quote_high"] = _to_wrap_list(traffic_quote_hi)
+    rows_out["traffic_quote_some"] = _to_wrap_list(traffic_quote_some)
+    rows_out["traffic_quote_no"] = _to_wrap_list(traffic_quote_no)
+
+    # For convenience: default fields (legacy names) will be frequency-mode lists (so old UI still works)
+    rows_out["traffic_high"] = rows_out["traffic_freq_high"]
+    rows_out["traffic_some"] = rows_out["traffic_freq_some"]
+    rows_out["traffic_no"] = rows_out["traffic_freq_no"]
+
+    # domain_scores maps for charting: freq_share and quote_share both provided
     domain_scores = {}
-    if not (traffic_high_vals or traffic_some_vals or traffic_no_vals):
-        hi = []
-        some = []
-        no = []
-        for domain in DOMAIN_CANON:
-            info = agg.get(domain) or {}
-            percent = info.get("percent", 0.0)
-            domain_scores[domain] = percent
-            level = _percent_to_level(percent)
-            if level == "hi":
-                hi.append(domain)
-            elif level == "some":
-                some.append(domain)
-            else:
-                no.append(domain)
-        traffic_high_vals = ", ".join(hi) if hi else None
-        traffic_some_vals = ", ".join(some) if some else None
-        traffic_no_vals = ", ".join(no) if no else None
-    else:
-        # If user-provided traffic lists exist, still set domain_scores for chart using normalized shares
-        # domain_scores_map contains shares that sum to ~100 (or zeros)
-        for domain in DOMAIN_CANON:
-            # expose share (0-100) for chart usage
-            domain_scores[domain] = domain_scores_map.get(domain, 0.0)
+    for domain in DOMAIN_CANON:
+        info = agg.get(domain, {})
+        domain_scores[domain] = {
+            "freq_percent": info.get("percent", 0.0),
+            "freq_share": info.get("freq_share", 0.0),
+            "quote_share": info.get("quote_share", 0.0),
+            "quote_count": info.get("quote_count", 0),
+        }
 
-    def _wrap(val):
-        if val is None:
-            return {"value": None, "quote": None, "confidence": 0.0}
-        return {"value": val, "quote": None, "confidence": 1.0}
+    rows_out["domain_objects"] = domain_objects
+    rows_out["domain_scores"] = domain_scores
 
-    rows_out = rows.copy()
-    rows_out["traffic_high"] = _wrap(traffic_high_vals)
-    rows_out["traffic_some"] = _wrap(traffic_some_vals)
-    rows_out["traffic_no"] = _wrap(traffic_no_vals)
-
-    # always expose domain_scores for the chart (domain -> numeric percent/share)
-    # prefer share-based normalized values (sums to ~100) if available, otherwise fall back to percent
-    if any(v > 0 for v in domain_scores_map.values()):
-        rows_out["domain_scores"] = domain_scores_map
-    else:
-        # fallback: use per-domain percent (local metric) if no weighted share present
-        rows_out["domain_scores"] = { domain: (agg.get(domain, {}).get("percent", 0.0) or 0.0) for domain in DOMAIN_CANON }
-
+    # Ensure recommendations exist
     if "recommendations" not in rows_out or not rows_out["recommendations"].get("value"):
         rows_out["recommendations"] = {"value": None, "quote": None, "confidence": 0.0}
 
-    # Persist derived rows for debugging
+    # persist derived rows for debugging
     try:
         outp = (DATA_ROOT / session_id / "analytics_rows_from_filled.json") if (DATA_ROOT / session_id).exists() else (DATA_ROOT / f"{session_id}_analytics_rows_from_filled.json")
         outp.parent.mkdir(parents=True, exist_ok=True)

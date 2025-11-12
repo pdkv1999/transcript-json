@@ -24,8 +24,11 @@
     .meta div span { color: var(--muted); }
     .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 18px;
       position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10; }
+    .mode-controls { margin-right: auto; display:flex; gap:8px; align-items:center; }
     button { border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
     button.primary { background: #111827; color: #fff; border-color: #111827; }
+    button.mode { background:#fff; border-radius:6px; padding:6px 10px; font-size:13px; }
+    button.mode.active { background:#111827; color:#fff; border-color:#111827; }
     .section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
     .section h2 { font-size: 16px; margin: 0 0 8px; }
     .summary { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 15px; min-height: 56px; }
@@ -33,8 +36,8 @@
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff; }
     .chip.hi { background: var(--hi); } .chip.some { background: var(--some); } .chip.no { background: var(--no); }
-    .domains { display: grid; gap: 12px; margin-top: 12px; }
-    .domain-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; }
+    .domains { display: grid; gap: 12px; margin-top: 12px; grid-template-columns: repeat(3, 1fr); }
+    .domain-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; min-height:120px; }
     .domain-title { font-weight: 600; margin: 0 0 6px; display:flex; align-items:center; justify-content: space-between; gap: 12px; }
     .domain-badge { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; white-space:nowrap; }
     .badge-hi { background: var(--hi); } .badge-some { background: var(--some); } .badge-no { background: var(--no); }
@@ -43,13 +46,14 @@
     .status.show { display:block; }
     .status.ok { background: var(--ok); }
     .status.err { background: var(--err); }
-    canvas { max-width: 100%; display:block; }
-    /* canvas container to control height reliably */
-    .chart-wrap { width: 100%; height: 320px; max-height: 420px; }
+    canvas { max-width: 100%; }
+    @media (max-width:900px) {
+      .domains { grid-template-columns: repeat(1, 1fr); }
+      .meta { grid-template-columns: repeat(2, 1fr); }
+    }
     @media print { .toolbar, .status { display:none !important; } .container { box-shadow:none; border-radius:0; margin:0; } }
   </style>
 
-  <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -68,6 +72,10 @@
     </header>
 
     <div class="toolbar">
+      <div class="mode-controls">
+        <button id="modeFreq" class="mode active">Use Frequency</button>
+        <button id="modeQuotes" class="mode">Use Quotes</button>
+      </div>
       <button id="regen">Regenerate insights</button>
       <button id="save" class="primary">Save Report</button>
       <button id="print">Print Report</button>
@@ -93,9 +101,9 @@
 
     <section class="section">
       <h2>Burden of Conversation (Parent-Reported Focus)</h2>
-      <div class="chart-wrap"><canvas id="burdenChart" aria-label="Burden of conversation chart" role="img"></canvas></div>
+      <canvas id="burdenChart" height="240"></canvas>
       <div style="font-size:12px;color:var(--muted); margin-top:8px;">
-        Chart shows each domain's share of the conversation burden (sums ≈ 100%).
+        Chart shows each domain's share (sums ≈ 100%). Use "Use Frequency" or "Use Quotes" to switch modes.
       </div>
     </section>
 
@@ -123,6 +131,8 @@
     const regenBtn = document.getElementById('regen');
     const saveBtn = document.getElementById('save');
     const printBtn = document.getElementById('print');
+    const modeFreqBtn = document.getElementById('modeFreq');
+    const modeQuotesBtn = document.getElementById('modeQuotes');
 
     const statusEl = document.getElementById('status');
     const stampEl = document.getElementById('stamp');
@@ -141,8 +151,9 @@
     const recsEl = document.getElementById('recs');
     const domainsEl = document.getElementById('domains');
 
-    // Chart.js chart instance (re-used to avoid duplicates)
     let chartInstance = null;
+    let rows_cache = null;
+    let currentMode = "frequency"; // or "quotes"
 
     const DOMAIN_ORDER = [
       "Attention / ADHD",
@@ -168,6 +179,7 @@
 
     function parseList(value) {
       if (!value) return [];
+      if (Array.isArray(value)) return value;
       const raw = String(value).split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
       const seen = new Set(); const out = [];
       for (const s of raw) { if (!seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); } }
@@ -183,114 +195,51 @@
       return span;
     }
 
-    // Determine level from textual value or percent
-    function levelFromValueOrPercent(obj) {
-      if (!obj) return "some";
-      if (typeof obj === "number") {
-        const p = obj;
-        if (p >= 70) return "high";
-        if (p >= 40) return "some";
-        return "no";
-      }
-      const v = (obj && (obj.value || obj) ? (obj.value || obj) : "").toString().toLowerCase();
-      if (!v || v === "none" || v === "na" || v === "n/a") return "no";
-      if (v.includes("alot") || v.includes("a lot") || v.includes("always") || v.includes("often") || v.includes("frequent")) return "high";
-      if (v.includes("some") || v.includes("sometimes") || v.includes("occasionally") || v.includes("just some")) return "some";
-      if (obj && obj.confidence && typeof obj.confidence === "number") {
-        if (obj.confidence >= 0.75) return "high";
-        if (obj.confidence >= 0.45) return "some";
-        return "no";
-      }
+    function levelFromPercent(p) {
+      if (p === null || p === undefined) return "some";
+      const x = Number(p) || 0;
+      if (x > 70) return "high";
+      if (x >= 40) return "some";
+      if (x < 30) return "no";
       return "some";
     }
 
-    // Build chart data from API's domain_scores:
-    function buildChartData(domain_scores_obj) {
+    function buildChartData(domain_scores_obj, mode) {
       const labels = [];
       const values = [];
       DOMAIN_ORDER.forEach(d => {
         let val = 0;
-        if (!domain_scores_obj) {
-          val = 0;
-        } else {
-          // try several keys
-          const entry = (domain_scores_obj[d] !== undefined) ? domain_scores_obj[d]
-                      : (domain_scores_obj[d.toLowerCase()] !== undefined ? domain_scores_obj[d.toLowerCase()] : null);
-          if (entry == null) {
-            val = 0;
-          } else if (typeof entry === "number") {
-            val = Number(entry || 0);
-          } else if (typeof entry === "object") {
-            // prefer share if available, otherwise percent
-            val = Number((entry.share !== undefined && entry.share !== null) ? entry.share : (entry.percent !== undefined ? entry.percent : 0));
+        const entry = domain_scores_obj && domain_scores_obj[d];
+        if (!entry) { val = 0; }
+        else {
+          if (mode === "frequency") {
+            val = Number(entry.freq_share || entry.freq_percent || 0);
           } else {
-            val = Number(entry) || 0;
+            val = Number(entry.quote_share || 0);
           }
         }
         labels.push(d);
         values.push(Math.max(0, Number(val)));
       });
 
-      // Normalize values to sum to 100 if appropriate (if sum > 0)
       const sum = values.reduce((a,b) => a+b, 0);
-      let normalized = values.slice();
-      if (sum > 0) {
-        // if already approx 100 keep, otherwise scale to 100
-        if (!(Math.abs(sum - 100) <= 1)) {
-          normalized = values.map(v => (v / sum) * 100);
-        }
-      } else {
-        // leave zeros
+      if (sum > 0 && !(Math.abs(sum - 100) <= 1)) {
+        for (let i=0;i<values.length;i++) values[i] = (values[i] / sum) * 100;
       }
-      // round to 1 decimal for display
-      const rounded = normalized.map(v => Math.round(v * 10) / 10);
-      return { labels, values: rounded, sum: rounded.reduce((a,b)=>a+b,0) };
+      const rounded = values.map(v => Math.round(v * 10) / 10);
+      return { labels, values: rounded };
     }
 
-    function renderBurdenChart(domain_scores_obj) {
+    function renderBurdenChart(domain_scores_obj, mode) {
       const canvas = document.getElementById('burdenChart');
-
-      // set fixed physical pixel height to avoid resizing loops
-      try {
-        canvas.style.height = '320px';
-        canvas.height = 320;
-      } catch (e) { /* ignore */ }
-
+      canvas.style.height = '320px';
+      canvas.height = 320;
       const ctx = canvas.getContext('2d');
+      const { labels, values } = buildChartData(domain_scores_obj, mode);
 
-      // build labels/values
-      const { labels, values, sum } = buildChartData(domain_scores_obj);
-
-      // destroy prior chart if exists to avoid accumulation and memory leak
       if (chartInstance) {
-        try { chartInstance.destroy(); } catch (e) { /* ignore */ }
+        try { chartInstance.destroy(); } catch (e) {}
         chartInstance = null;
-      }
-
-      // If no meaningful data, render a subtle empty chart with muted message
-      const hasData = values.some(v => v > 0.001);
-
-      if (!hasData) {
-        // render a tiny placeholder empty chart using transparent bars + text overlay
-        chartInstance = new Chart(ctx, {
-          type: 'bar',
-          data: { labels, datasets: [{ label: 'Share (%)', data: values, backgroundColor: labels.map(()=>'rgba(0,0,0,0.03)') }] },
-          options: {
-            indexAxis: 'y',
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: { x: { display: false }, y: { ticks: { autoSkip: false } } },
-            plugins: { legend: { display: false }, tooltip: { enabled: false } }
-          }
-        });
-        // overlay text
-        ctx.save();
-        ctx.font = "14px system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial";
-        ctx.fillStyle = "#6b7280";
-        ctx.textAlign = "center";
-        ctx.fillText("No domain data available to display", canvas.width / 2, canvas.height / 2);
-        ctx.restore();
-        return;
       }
 
       chartInstance = new Chart(ctx, {
@@ -311,7 +260,8 @@
         options: {
           indexAxis: 'y',
           responsive: true,
-          maintainAspectRatio: false, // IMPORTANT: prevents aspect-ratio loops
+          maintainAspectRatio: true,
+          aspectRatio: 4,
           scales: {
             x: {
               beginAtZero: true,
@@ -319,17 +269,14 @@
               ticks: { callback: (v) => `${v}%` }
             },
             y: {
-              ticks: { autoSkip: false }
+              ticks: { autoSkip: false },
             }
           },
           plugins: {
             legend: { display: false },
             tooltip: {
               callbacks: {
-                label: function(ctx) {
-                  const val = ctx.parsed.x;
-                  return `${val}%`;
-                }
+                label: function(ctx) { return `${ctx.parsed.x}%`; }
               }
             }
           }
@@ -337,32 +284,34 @@
       });
     }
 
-    // render traffic lights from rows (preferred)
-    function renderTrafficLights(rows) {
+    function renderTrafficLights(rows, mode) {
       chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
-
-      const hiList = parseList(rows?.traffic_high?.value || rows?.traffic_high || "");
-      const someList = parseList(rows?.traffic_some?.value || rows?.traffic_some || "");
-      const noList = parseList(rows?.traffic_no?.value || rows?.traffic_no || "");
-
-      if (hiList.length === 0 && someList.length === 0 && noList.length === 0) {
-        DOMAIN_ORDER.forEach((title) => {
-          const key = ('domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/__+/g,'_');
-          const r = rows && (rows[key] || rows[title] || null);
-          const lvl = levelFromValueOrPercent(r);
-          if (lvl === "high") hiList.push(title);
-          else if (lvl === "some") someList.push(title);
-          else noList.push(title);
-        });
+      // use server-provided lists: traffic_freq_* or traffic_quote_*
+      let hiList = [], someList = [], noList = [];
+      if (mode === "frequency") {
+        hiList = rows?.traffic_freq_high?.list || parseList(rows?.traffic_freq_high?.value);
+        someList = rows?.traffic_freq_some?.list || parseList(rows?.traffic_freq_some?.value);
+        noList = rows?.traffic_freq_no?.list || parseList(rows?.traffic_freq_no?.value);
+      } else {
+        hiList = rows?.traffic_quote_high?.list || parseList(rows?.traffic_quote_high?.value);
+        someList = rows?.traffic_quote_some?.list || parseList(rows?.traffic_quote_some?.value);
+        noList = rows?.traffic_quote_no?.list || parseList(rows?.traffic_quote_no?.value);
       }
 
-      tlHighEl.textContent = hiList.join(", ") || "—";
-      tlSomeEl.textContent = someList.join(", ") || "—";
-      tlNoEl.textContent = noList.join(", ") || "—";
+      // ensure no duplication across lists: prefer hi > some > no
+      const deduped = new Set();
+      const finalHi = [], finalSome = [], finalNo = [];
+      for (const x of hiList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalHi.push(x); } }
+      for (const x of someList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalSome.push(x); } }
+      for (const x of noList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalNo.push(x); } }
 
-      hiList.forEach(x => chipsHi.appendChild(chip(x, "hi")));
-      someList.forEach(x => chipsSome.appendChild(chip(x, "some")));
-      noList.forEach(x => chipsNo.appendChild(chip(x, "no")));
+      tlHighEl.textContent = finalHi.length ? finalHi.join(", ") : "—";
+      tlSomeEl.textContent = finalSome.length ? finalSome.join(", ") : "—";
+      tlNoEl.textContent = finalNo.length ? finalNo.join(", ") : "—";
+
+      finalHi.forEach(x => chipsHi.appendChild(chip(x, "hi")));
+      finalSome.forEach(x => chipsSome.appendChild(chip(x, "some")));
+      finalNo.forEach(x => chipsNo.appendChild(chip(x, "no")));
     }
 
     function renderRecommendations(rows) {
@@ -376,50 +325,47 @@
       });
     }
 
-    function renderDomains(rows) {
+    function renderDomains(rows, mode) {
       domainsEl.innerHTML = "";
+      const domain_objects = rows.domain_objects || rows.domain_objects || {};
       for (const title of DOMAIN_ORDER) {
-        const simple_key = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-        const alt_key = title.toLowerCase().replace(/\s+/g, '_');
-        const obj = rows[simple_key] || rows[alt_key] || rows[title] || { value: null, quote: null, confidence: 0.0 };
-
-        const card = document.createElement('div');
-        card.className = "domain-card";
-        const h = document.createElement('div');
-        h.className = "domain-title";
-
-        const left = document.createElement('div');
-        left.textContent = title;
-
-        const level = levelFromValueOrPercent(obj);
+        const obj = domain_objects[title] || (rows['domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_')] || {});
+        const card = document.createElement('div'); card.className = "domain-card";
+        const h = document.createElement('div'); h.className = "domain-title";
+        const left = document.createElement('div'); left.textContent = title;
+        const level = (() => {
+          if (mode === "frequency") return levelFromPercent(obj.freq_percent || obj.freq_share || 0);
+          return levelFromPercent(obj.quote_share || 0);
+        })();
         const right = badge(level);
+        h.appendChild(left); h.appendChild(right); card.appendChild(h);
 
-        h.appendChild(left);
-        h.appendChild(right);
-        card.appendChild(h);
+        const valLine = document.createElement('div');
+        valLine.style.fontWeight = '600';
+        valLine.style.marginBottom = '6px';
+        valLine.textContent = (obj.value || (obj.freq_percent !== undefined ? (obj.freq_percent + "%") : "—")) || "—";
+        card.appendChild(valLine);
 
-        if (obj && obj.value) {
-          const p = document.createElement('div');
-          p.textContent = String(obj.value);
-          card.appendChild(p);
-        } else {
-          const p = document.createElement('div');
-          p.style.opacity = "0.7";
-          p.textContent = "—";
-          card.appendChild(p);
-        }
-        if (obj && obj.quote) {
-          const q = document.createElement('div');
-          q.className = "quote";
+        if (obj.quote) {
+          const q = document.createElement('div'); q.className = "quote";
           q.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
           card.appendChild(q);
+        } else {
+          const q = document.createElement('div'); q.className = "quote";
+          q.style.opacity = 0.8;
+          q.textContent = "—";
+          card.appendChild(q);
         }
+
+        const meta = document.createElement('div'); meta.style.marginTop = '8px'; meta.style.color = 'var(--muted)'; meta.style.fontSize = '13px';
+        const shareText = mode === "frequency" ? (Number(obj.freq_share || obj.freq_percent || 0).toFixed(1) + "%") : (Number(obj.quote_share || 0).toFixed(1) + "%");
+        meta.textContent = `Share: ${shareText} • Quotes: ${obj.quote_count || 0}`;
+        card.appendChild(meta);
 
         domainsEl.appendChild(card);
       }
     }
 
-    // Main regenerate flow
     async function regenerate() {
       clearStatus();
       showStatus("Generating insights…", "ok");
@@ -428,7 +374,6 @@
       recsEl.innerHTML = "";
       domainsEl.innerHTML = "";
       chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
-
       try {
         const res = await fetch(`/api/analytics/${encodeURIComponent(sessionId)}`);
         if (!res.ok) {
@@ -445,7 +390,7 @@
           return;
         }
 
-        // header refresh
+        rows_cache = data.rows || {};
         const h = data.header || {};
         document.getElementById("child-name").textContent = h.child_name || "—";
         document.getElementById("child-age").textContent = h.child_age || "—";
@@ -455,40 +400,17 @@
         document.getElementById("ref-source").textContent = h.referral_source || "—";
         if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
 
-        const rows = data.rows || {};
-
-        // Summary + parent quote
-        summaryEl.textContent = rows?.summary_overview?.value || rows?.summary_overview || "—";
-        const pq = (rows?.parent_quote && (rows.parent_quote.quote || rows.parent_quote.value)) || rows.parent_quote || "";
+        summaryEl.textContent = rows_cache?.summary_overview?.value || rows_cache?.summary_overview || "—";
+        const pq = (rows_cache?.parent_quote && (rows_cache.parent_quote.quote || rows_cache.parent_quote.value)) || rows_cache.parent_quote || "";
         quoteEl.textContent = pq ? ('Parent Quote: “' + pq + '”') : "";
 
-        // Traffic lights
-        renderTrafficLights(rows);
+        renderRecommendations(rows_cache);
+        renderTrafficLights(rows_cache, currentMode);
+        renderDomains(rows_cache, currentMode);
 
-        // Recommendations & domains
-        renderRecommendations(rows);
-        renderDomains(rows);
-
-        // Bar chart: prefer rows.domain_scores (array/object)
-        let domain_scores = rows.domain_scores || rows.domain_scores_map || null;
-
-        if (!domain_scores) {
-          // Build domain_scores from domain_* entries if server didn't return domain_scores
-          domain_scores = {};
-          DOMAIN_ORDER.forEach(title => {
-            const k = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-            const r = rows[k] || rows[title] || null;
-            if (r && typeof r === "object") {
-              domain_scores[title] = { percent: (r.percent || null), share: (r.share || null) , value: r.value || null };
-            } else if (r !== null && r !== undefined) {
-              domain_scores[title] = Number(r) || 0;
-            } else {
-              domain_scores[title] = 0;
-            }
-          });
-        }
-
-        renderBurdenChart(domain_scores);
+        // Chart
+        const domain_scores = rows_cache.domain_scores || {};
+        renderBurdenChart(domain_scores, currentMode);
 
         setStamp();
         showStatus("Insights generated successfully.", "ok");
@@ -499,11 +421,30 @@
       }
     }
 
+    modeFreqBtn.addEventListener('click', () => {
+      currentMode = "frequency";
+      modeFreqBtn.classList.add('active'); modeQuotesBtn.classList.remove('active');
+      if (rows_cache) {
+        renderTrafficLights(rows_cache, currentMode);
+        renderDomains(rows_cache, currentMode);
+        renderBurdenChart(rows_cache.domain_scores || {}, currentMode);
+      }
+    });
+    modeQuotesBtn.addEventListener('click', () => {
+      currentMode = "quotes";
+      modeQuotesBtn.classList.add('active'); modeFreqBtn.classList.remove('active');
+      if (rows_cache) {
+        renderTrafficLights(rows_cache, currentMode);
+        renderDomains(rows_cache, currentMode);
+        renderBurdenChart(rows_cache.domain_scores || {}, currentMode);
+      }
+    });
+
     regenBtn.addEventListener('click', regenerate);
     printBtn.addEventListener('click', () => window.print());
     saveBtn.addEventListener('click', () => window.print());
 
-    // Auto-load once
+    // Auto-load
     regenerate();
   </script>
 </body>
