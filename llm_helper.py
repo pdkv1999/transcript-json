@@ -1,7 +1,13 @@
+# llm_helper.py
 """
 LLM helper: Gemini integration (defensive + verbose logging).
 Supports both `google.generativeai` and `google.genai` SDKs.
 Provides robust JSON extraction without recursive regex.
+
+This version:
+- Accepts extra kwargs in call_gemini_functional for compatibility with different callers.
+- Handles google.api_core.exceptions.PermissionDenied (403) specially: marks key invalid and returns None.
+- Attempts SDK calls with optional parameters (temperature, max_output_tokens) but gracefully retries without them if unsupported.
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # ------------------ Logging ------------------
 
@@ -39,14 +45,14 @@ _ggen_exc: Optional[Exception] = None
 _ggenai_exc: Optional[Exception] = None
 
 try:
-    import google.generativeai as ggen
+    import google.generativeai as ggen  # type: ignore
     gemini_client = ggen
     gemini_variant = "google.generativeai"
     log.info("Gemini SDK selected: google.generativeai")
 except Exception as e:
     _ggen_exc = e
     try:
-        import google.genai as genai_sdk
+        import google.genai as genai_sdk  # type: ignore
         gemini_client = genai_sdk
         gemini_variant = "google.genai"
         log.info("Gemini SDK selected: google.genai")
@@ -55,6 +61,12 @@ except Exception as e:
         gemini_client = None
         gemini_variant = None
         log.error("No Gemini SDK available: google.generativeai error=%s ; google.genai error=%s", _ggen_exc, _ggenai_exc)
+
+# Try to import google.api_core.exceptions for better exception handling (optional)
+try:
+    from google.api_core import exceptions as google_api_exceptions  # type: ignore
+except Exception:
+    google_api_exceptions = None  # type: ignore
 
 # ------------------ Configure + Validate ------------------
 
@@ -307,11 +319,20 @@ def call_gemini_functional(
     schema_rows: Optional[List[Dict[str, Any]]],
     transcript: str,
     model: Optional[str] = None,
+    **kwargs
 ) -> Optional[Dict[str, Any]]:
     """
     Calls Gemini to extract values and supporting quotes into strict JSON.
     Returns a dict mapping row_key -> {value, quote, confidence} or None on failure.
+
+    Accepts **kwargs for compatibility:
+      - temperature: float (optional)
+      - max_output_tokens: int (optional)
+      - force_json: bool (informational)
+      - response_schema: dict (informational)
     """
+    global _gemini_api_key_valid
+
     if gemini_client is None:
         log.error("Gemini client is None; cannot call LLM.")
         return None
@@ -321,6 +342,12 @@ def call_gemini_functional(
     if not transcript:
         log.warning("Empty transcript provided; skipping LLM call.")
         return None
+
+    # Pull caller-provided preferences (best-effort)
+    temperature = kwargs.get("temperature", 0.2)
+    max_output_tokens = kwargs.get("max_output_tokens")
+    force_json = kwargs.get("force_json", False)
+    response_schema = kwargs.get("response_schema", None)
 
     system_prompt = (
         "You are an expert data extractor and evidence annotator. "
@@ -373,27 +400,76 @@ def call_gemini_functional(
     try:
         for candidate in candidates or [GEMINI_MODEL_DEFAULT]:
             try:
+                # Build call args for SDK; attempt to use temperature/max_output_tokens if supported.
+                call_args = {}
+                # generativeai/genei may accept some of these; we'll try and fall back if TypeError occurs.
+                if temperature is not None:
+                    call_args["temperature"] = temperature
+                if max_output_tokens is not None:
+                    # different SDKs may accept slightly different names; try 'max_output_tokens'
+                    call_args["max_output_tokens"] = max_output_tokens
+
                 if gemini_variant == "google.generativeai":
                     log.info("LLM attempt (generativeai.generate_content) model=%s", candidate)
                     model_obj = gemini_client.GenerativeModel(candidate)
-                    resp = model_obj.generate_content(prompt)
+                    try:
+                        resp = model_obj.generate_content(prompt, **call_args)  # type: ignore
+                    except TypeError:
+                        # some SDK versions may not accept our extra args; retry without them
+                        resp = model_obj.generate_content(prompt)
                     text = getattr(resp, "text", None) or ""
                 elif gemini_variant == "google.genai":
                     log.info("LLM attempt (genai.GenerativeModel.generate_content) model=%s", candidate)
                     model_obj = gemini_client.GenerativeModel(candidate, api_key=GEMINI_API_KEY)
-                    resp = model_obj.generate_content(prompt)
+                    try:
+                        resp = model_obj.generate_content(prompt, **call_args)  # type: ignore
+                    except TypeError:
+                        resp = model_obj.generate_content(prompt)
+                    # new SDK may populate `text` differently
                     text = getattr(resp, "text", None) or ""
-                    if not text and hasattr(resp, "candidates"):
-                        text = str(resp)
+                    if not text:
+                        # attempt to extract candidate text representation
+                        if hasattr(resp, "candidates"):
+                            try:
+                                cand = getattr(resp, "candidates")
+                                if isinstance(cand, (list, tuple)) and len(cand) > 0:
+                                    text = getattr(cand[0], "content", None) or str(cand[0])
+                                else:
+                                    text = str(resp)
+                            except Exception:
+                                text = str(resp)
                 else:
                     log.error("Unknown gemini_variant during call: %s", gemini_variant)
+                    text = ""
 
                 if text:
                     log.info("LLM returned %d chars.", len(text))
                     break
                 else:
                     log.warning("Empty text for model=%s; trying next.", candidate)
+
             except Exception as ge:
+                # If it's a Google PermissionDenied (403), abort further attempts and mark API key invalid.
+                try:
+                    if google_api_exceptions is not None and isinstance(ge, google_api_exceptions.PermissionDenied):
+                        log.error("LLM PermissionDenied (403): API key invalid or leaked. Aborting further LLM attempts.")
+                        _gemini_api_key_valid = False
+                        return None
+                except Exception:
+                    # ignore type-check error and fall back to message check
+                    pass
+
+                # Fallback message-based detection for 403-like errors
+                msg = str(ge).lower()
+                if "403" in msg or "permissiondenied" in msg or "permission denied" in msg or "reported as leaked" in msg:
+                    log.error("LLM call failed with 403-like error: %s", ge)
+                    try:
+                        _gemini_api_key_valid = False
+                    except Exception:
+                        pass
+                    return None
+
+                # Otherwise log and continue to next candidate
                 log.exception("Model %s call failed; trying next. Error: %s", candidate, ge)
 
         if not text:

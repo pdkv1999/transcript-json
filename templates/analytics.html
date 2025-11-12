@@ -10,39 +10,47 @@
       --ink: #111827; --muted: #4b5563; --line: #e5e7eb;
       --hi: #dc2626; --some: #f59e0b; --no: #10b981;
       --bg: #ffffff; --card: #ffffff;
-      --warn: #fef3c7; --err: #fee2e2; --ok: #ecfdf5;
+      --ok: #ecfdf5; --err: #fee2e2;
     }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; line-height: 1.4; }
-    .container { max-width: 900px; margin: 24px auto 64px; padding: 24px; background: var(--card);
-      box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.1); border-radius: 12px; }
-    header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: 0.2px; }
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
+      line-height: 1.4; }
+    .container { max-width: 980px; margin: 20px auto 64px; padding: 20px; background: var(--card);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04); border-radius: 10px; }
+    header h1 { margin: 0 0 4px; font-size: 22px; }
     header p { margin: 0; color: var(--muted); }
-    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 16px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
+    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 14px; margin-top: 10px;
+      padding-top: 10px; border-top: 1px solid var(--line); font-size: 14px; }
     .meta div span { color: var(--muted); }
-    .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 20px; position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10; }
-    button { border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+    .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 18px;
+      position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10; }
+    button { border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
     button.primary { background: #111827; color: #fff; border-color: #111827; }
-    .section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
-    .section h2 { font-size: 18px; margin: 0 0 8px; }
-    .status { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; margin: 8px 0 12px; display: none; }
-    .status.show { display: block; } .status.ok { background: var(--ok); } .status.err { background: var(--err); }
-    .summary { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line); border-radius: 10px; padding: 12px; font-size: 15px; min-height: 56px; }
+    .section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .section h2 { font-size: 16px; margin: 0 0 8px; }
+    .summary { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 15px; min-height: 56px; }
     .quote { color: var(--muted); font-style: italic; margin-top: 8px; }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff; }
     .chip.hi { background: var(--hi); } .chip.some { background: var(--some); } .chip.no { background: var(--no); }
-    .domains { display: grid; gap: 12px; }
-    .domain-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; }
-    .domain-title { font-weight: 600; margin: 0 0 6px; display:flex; align-items:center; gap:8px; justify-content:space-between; }
-    .domain-badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; }
+    .domains { display: grid; gap: 12px; margin-top: 12px; }
+    .domain-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; }
+    .domain-title { font-weight: 600; margin: 0 0 6px; display:flex; align-items:center; justify-content: space-between; gap: 12px; }
+    .domain-badge { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; white-space:nowrap; }
     .badge-hi { background: var(--hi); } .badge-some { background: var(--some); } .badge-no { background: var(--no); }
     .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
-    .skeleton { position: relative; overflow: hidden; background: #f3f4f6; border-radius: 8px; height: 14px; }
-    .skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,.6) 50%, rgba(255,255,255,0) 100%); animation: shimmer 1.3s infinite; }
-    @keyframes shimmer { 100% { transform: translateX(100%);} }
-    @media print { html, body { background: #fff; } .toolbar, .status { display: none !important; } .container { box-shadow: none; margin: 0; border-radius: 0; } @page { size: A4; margin: 16mm; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+    .status { padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; display:none; }
+    .status.show { display:block; }
+    .status.ok { background: var(--ok); }
+    .status.err { background: var(--err); }
+    canvas { max-width: 100%; display:block; }
+    /* canvas container to control height reliably */
+    .chart-wrap { width: 100%; height: 320px; max-height: 420px; }
+    @media print { .toolbar, .status { display:none !important; } .container { box-shadow:none; border-radius:0; margin:0; } }
   </style>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <div class="container" id="report-root">
@@ -69,21 +77,26 @@
 
     <section class="section">
       <h2>Summary of Key Findings</h2>
-      <div id="summary" class="summary">
-        <div class="skeleton" style="width:60%; height:14px; margin-bottom:6px;"></div>
-        <div class="skeleton" style="width:40%; height:14px;"></div>
-      </div>
+      <div id="summary" class="summary">Loading…</div>
       <div id="parent-quote" class="quote"></div>
     </section>
 
     <section class="section">
       <h2>Traffic-Light Summary of Concerns</h2>
-      <div><b>High Concerns:</b> <span id="tl-high"></span></div>
-      <div style="margin-top:6px;"><b>Some Concerns:</b> <span id="tl-some"></span></div>
-      <div style="margin-top:6px;"><b>No Concerns:</b> <span id="tl-no"></span></div>
+      <div><b>High Concerns:</b> <span id="tl-high">—</span></div>
+      <div style="margin-top:6px;"><b>Some Concerns:</b> <span id="tl-some">—</span></div>
+      <div style="margin-top:6px;"><b>No Concerns:</b> <span id="tl-no">—</span></div>
       <div class="chips" id="chips-hi" style="margin-top:8px;"></div>
       <div class="chips" id="chips-some" style="margin-top:6px;"></div>
       <div class="chips" id="chips-no" style="margin-top:6px;"></div>
+    </section>
+
+    <section class="section">
+      <h2>Burden of Conversation (Parent-Reported Focus)</h2>
+      <div class="chart-wrap"><canvas id="burdenChart" aria-label="Burden of conversation chart" role="img"></canvas></div>
+      <div style="font-size:12px;color:var(--muted); margin-top:8px;">
+        Chart shows each domain's share of the conversation burden (sums ≈ 100%).
+      </div>
     </section>
 
     <section class="section">
@@ -108,7 +121,7 @@
   <script>
     const sessionId = "{{ session_id }}";
     const regenBtn = document.getElementById('regen');
-    const saveBtn  = document.getElementById('save');
+    const saveBtn = document.getElementById('save');
     const printBtn = document.getElementById('print');
 
     const statusEl = document.getElementById('status');
@@ -128,9 +141,22 @@
     const recsEl = document.getElementById('recs');
     const domainsEl = document.getElementById('domains');
 
+    // Chart.js chart instance (re-used to avoid duplicates)
+    let chartInstance = null;
+
+    const DOMAIN_ORDER = [
+      "Attention / ADHD",
+      "Learning / Dyslexia",
+      "Sleep",
+      "Motor Skills",
+      "Anxiety / Emotion",
+      "Social / Communication",
+      "Eating"
+    ];
+
     function showStatus(msg, type="ok") {
       statusEl.textContent = msg;
-      statusEl.className = `status show ${type}`;
+      statusEl.className = `status show ${type === "err" ? "err" : "ok"}`;
     }
     function clearStatus() { statusEl.className = "status"; statusEl.textContent = ""; }
     function setStamp() {
@@ -150,41 +176,6 @@
 
     function chip(text, cls) { const d = document.createElement('div'); d.className = `chip ${cls}`; d.textContent = text; return d; }
 
-    function renderTrafficLights(rows) {
-      const hi = parseList(rows?.traffic_high?.value);
-      const some = parseList(rows?.traffic_some?.value);
-      const no = parseList(rows?.traffic_no?.value);
-
-      tlHighEl.textContent = hi.join(", ") || "—";
-      tlSomeEl.textContent = some.join(", ") || "—";
-      tlNoEl.textContent = no.join(", ") || "—";
-
-      chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
-      hi.forEach(x => chipsHi.appendChild(chip(x, "hi")));
-      some.forEach(x => chipsSome.appendChild(chip(x, "some")));
-      no.forEach(x => chipsNo.appendChild(chip(x, "no")));
-    }
-
-    function domainSpec() {
-      return [
-        ["Attention / ADHD", "domain_attention_adhd"],
-        ["Learning / Dyslexia", "domain_learning_dyslexia"],
-        ["Sleep", "domain_sleep"],
-        ["Motor Skills", "domain_motor_skills"],
-        ["Anxiety / Emotion", "domain_anxiety_emotion"],
-        ["Social / Communication", "domain_social_communication"],
-        ["Eating", "domain_eating"],
-      ];
-    }
-
-    function levelBadgeText(text) {
-      const t = (text || "").toLowerCase();
-      if (t.includes("high")) return "high";
-      if (t.includes("some")) return "some";
-      if (t.includes("no")) return "no";
-      return "some";
-    }
-
     function badge(level) {
       const span = document.createElement('span');
       span.className = "domain-badge " + (level === "high" ? "badge-hi" : level === "some" ? "badge-some" : "badge-no");
@@ -192,43 +183,232 @@
       return span;
     }
 
+    // Determine level from textual value or percent
+    function levelFromValueOrPercent(obj) {
+      if (!obj) return "some";
+      if (typeof obj === "number") {
+        const p = obj;
+        if (p >= 70) return "high";
+        if (p >= 40) return "some";
+        return "no";
+      }
+      const v = (obj && (obj.value || obj) ? (obj.value || obj) : "").toString().toLowerCase();
+      if (!v || v === "none" || v === "na" || v === "n/a") return "no";
+      if (v.includes("alot") || v.includes("a lot") || v.includes("always") || v.includes("often") || v.includes("frequent")) return "high";
+      if (v.includes("some") || v.includes("sometimes") || v.includes("occasionally") || v.includes("just some")) return "some";
+      if (obj && obj.confidence && typeof obj.confidence === "number") {
+        if (obj.confidence >= 0.75) return "high";
+        if (obj.confidence >= 0.45) return "some";
+        return "no";
+      }
+      return "some";
+    }
+
+    // Build chart data from API's domain_scores:
+    function buildChartData(domain_scores_obj) {
+      const labels = [];
+      const values = [];
+      DOMAIN_ORDER.forEach(d => {
+        let val = 0;
+        if (!domain_scores_obj) {
+          val = 0;
+        } else {
+          // try several keys
+          const entry = (domain_scores_obj[d] !== undefined) ? domain_scores_obj[d]
+                      : (domain_scores_obj[d.toLowerCase()] !== undefined ? domain_scores_obj[d.toLowerCase()] : null);
+          if (entry == null) {
+            val = 0;
+          } else if (typeof entry === "number") {
+            val = Number(entry || 0);
+          } else if (typeof entry === "object") {
+            // prefer share if available, otherwise percent
+            val = Number((entry.share !== undefined && entry.share !== null) ? entry.share : (entry.percent !== undefined ? entry.percent : 0));
+          } else {
+            val = Number(entry) || 0;
+          }
+        }
+        labels.push(d);
+        values.push(Math.max(0, Number(val)));
+      });
+
+      // Normalize values to sum to 100 if appropriate (if sum > 0)
+      const sum = values.reduce((a,b) => a+b, 0);
+      let normalized = values.slice();
+      if (sum > 0) {
+        // if already approx 100 keep, otherwise scale to 100
+        if (!(Math.abs(sum - 100) <= 1)) {
+          normalized = values.map(v => (v / sum) * 100);
+        }
+      } else {
+        // leave zeros
+      }
+      // round to 1 decimal for display
+      const rounded = normalized.map(v => Math.round(v * 10) / 10);
+      return { labels, values: rounded, sum: rounded.reduce((a,b)=>a+b,0) };
+    }
+
+    function renderBurdenChart(domain_scores_obj) {
+      const canvas = document.getElementById('burdenChart');
+
+      // set fixed physical pixel height to avoid resizing loops
+      try {
+        canvas.style.height = '320px';
+        canvas.height = 320;
+      } catch (e) { /* ignore */ }
+
+      const ctx = canvas.getContext('2d');
+
+      // build labels/values
+      const { labels, values, sum } = buildChartData(domain_scores_obj);
+
+      // destroy prior chart if exists to avoid accumulation and memory leak
+      if (chartInstance) {
+        try { chartInstance.destroy(); } catch (e) { /* ignore */ }
+        chartInstance = null;
+      }
+
+      // If no meaningful data, render a subtle empty chart with muted message
+      const hasData = values.some(v => v > 0.001);
+
+      if (!hasData) {
+        // render a tiny placeholder empty chart using transparent bars + text overlay
+        chartInstance = new Chart(ctx, {
+          type: 'bar',
+          data: { labels, datasets: [{ label: 'Share (%)', data: values, backgroundColor: labels.map(()=>'rgba(0,0,0,0.03)') }] },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { x: { display: false }, y: { ticks: { autoSkip: false } } },
+            plugins: { legend: { display: false }, tooltip: { enabled: false } }
+          }
+        });
+        // overlay text
+        ctx.save();
+        ctx.font = "14px system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial";
+        ctx.fillStyle = "#6b7280";
+        ctx.textAlign = "center";
+        ctx.fillText("No domain data available to display", canvas.width / 2, canvas.height / 2);
+        ctx.restore();
+        return;
+      }
+
+      chartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Share (%)',
+            data: values,
+            backgroundColor: labels.map((l, i) => {
+              const palette = ['#e8505b','#f08a4b','#f5b86b','#b9d36b','#7fd0a8','#6fc2d6','#9ea0ff'];
+              return palette[i % palette.length];
+            }),
+            borderColor: 'rgba(0,0,0,0.03)',
+            borderWidth: 1,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false, // IMPORTANT: prevents aspect-ratio loops
+          scales: {
+            x: {
+              beginAtZero: true,
+              max: 100,
+              ticks: { callback: (v) => `${v}%` }
+            },
+            y: {
+              ticks: { autoSkip: false }
+            }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: function(ctx) {
+                  const val = ctx.parsed.x;
+                  return `${val}%`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // render traffic lights from rows (preferred)
+    function renderTrafficLights(rows) {
+      chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
+
+      const hiList = parseList(rows?.traffic_high?.value || rows?.traffic_high || "");
+      const someList = parseList(rows?.traffic_some?.value || rows?.traffic_some || "");
+      const noList = parseList(rows?.traffic_no?.value || rows?.traffic_no || "");
+
+      if (hiList.length === 0 && someList.length === 0 && noList.length === 0) {
+        DOMAIN_ORDER.forEach((title) => {
+          const key = ('domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/__+/g,'_');
+          const r = rows && (rows[key] || rows[title] || null);
+          const lvl = levelFromValueOrPercent(r);
+          if (lvl === "high") hiList.push(title);
+          else if (lvl === "some") someList.push(title);
+          else noList.push(title);
+        });
+      }
+
+      tlHighEl.textContent = hiList.join(", ") || "—";
+      tlSomeEl.textContent = someList.join(", ") || "—";
+      tlNoEl.textContent = noList.join(", ") || "—";
+
+      hiList.forEach(x => chipsHi.appendChild(chip(x, "hi")));
+      someList.forEach(x => chipsSome.appendChild(chip(x, "some")));
+      noList.forEach(x => chipsNo.appendChild(chip(x, "no")));
+    }
+
+    function renderRecommendations(rows) {
+      recsEl.innerHTML = "";
+      const items = parseList(rows?.recommendations?.value || rows?.recommendations || "");
+      if (!items.length) {
+        const li = document.createElement('li'); li.textContent = "—"; recsEl.appendChild(li); return;
+      }
+      items.forEach(line => {
+        const li = document.createElement('li'); li.textContent = line; recsEl.appendChild(li);
+      });
+    }
+
     function renderDomains(rows) {
       domainsEl.innerHTML = "";
-      for (const [title, key] of domainSpec()) {
-        const obj = rows[key] || {};
+      for (const title of DOMAIN_ORDER) {
+        const simple_key = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        const alt_key = title.toLowerCase().replace(/\s+/g, '_');
+        const obj = rows[simple_key] || rows[alt_key] || rows[title] || { value: null, quote: null, confidence: 0.0 };
+
         const card = document.createElement('div');
         card.className = "domain-card";
-
         const h = document.createElement('div');
         h.className = "domain-title";
+
         const left = document.createElement('div');
         left.textContent = title;
-        const right = document.createElement('div');
-        // Infer level: prefer explicit frequency value
-        const freqVal = obj.frequency || obj.value || "";
-        const level = levelBadgeText(freqVal);
-        right.appendChild(badge(level));
+
+        const level = levelFromValueOrPercent(obj);
+        const right = badge(level);
+
         h.appendChild(left);
         h.appendChild(right);
         card.appendChild(h);
 
-        if (obj.value) {
+        if (obj && obj.value) {
           const p = document.createElement('div');
           p.textContent = String(obj.value);
           card.appendChild(p);
+        } else {
+          const p = document.createElement('div');
+          p.style.opacity = "0.7";
+          p.textContent = "—";
+          card.appendChild(p);
         }
-
-        // show frequency explicitly if present and not identical to value
-        if (obj.frequency) {
-          const f = document.createElement('div');
-          f.style.fontSize = "13px";
-          f.style.marginTop = "6px";
-          f.style.color = "var(--muted)";
-          f.textContent = "Frequency: " + String(obj.frequency);
-          card.appendChild(f);
-        }
-
-        if (obj.quote) {
+        if (obj && obj.quote) {
           const q = document.createElement('div');
           q.className = "quote";
           q.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
@@ -239,84 +419,91 @@
       }
     }
 
-    function renderRecommendations(rows) {
-      recsEl.innerHTML = "";
-      const items = parseList(rows?.recommendations?.value);
-      items.forEach(line => {
-        const li = document.createElement('li');
-        li.textContent = line;
-        recsEl.appendChild(li);
-      });
-    }
-
+    // Main regenerate flow
     async function regenerate() {
       clearStatus();
-      summaryEl.innerHTML = `
-        <div class="skeleton" style="width:60%; height:14px; margin-bottom:6px;"></div>
-        <div class="skeleton" style="width:40%; height:14px;"></div>
-      `;
+      showStatus("Generating insights…", "ok");
+      summaryEl.textContent = "Loading…";
       quoteEl.textContent = "";
       recsEl.innerHTML = "";
       domainsEl.innerHTML = "";
       chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
-      tlHighEl.textContent = tlSomeEl.textContent = tlNoEl.textContent = "—";
 
-      let res, data;
       try {
-        res = await fetch(`/api/analytics/${encodeURIComponent(sessionId)}`);
+        const res = await fetch(`/api/analytics/${encodeURIComponent(sessionId)}`);
+        if (!res.ok) {
+          const errBody = await res.text();
+          showStatus("Analytics API error: " + res.status + " — see server logs", "err");
+          summaryEl.textContent = "Error calling analytics API.";
+          console.error("Analytics API failed:", res.status, errBody);
+          return;
+        }
+        const data = await res.json();
+        if (!data || !data.ok) {
+          showStatus("Analytics responded with error: " + (data && data.error ? data.error : "unknown"), "err");
+          summaryEl.textContent = "Error from analytics API.";
+          return;
+        }
+
+        // header refresh
+        const h = data.header || {};
+        document.getElementById("child-name").textContent = h.child_name || "—";
+        document.getElementById("child-age").textContent = h.child_age || "—";
+        document.getElementById("doi").textContent = h.date_of_interview || "—";
+        document.getElementById("parent").textContent = h.parent_respondent || "—";
+        document.getElementById("interviewer").textContent = h.interviewer || "—";
+        document.getElementById("ref-source").textContent = h.referral_source || "—";
+        if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
+
+        const rows = data.rows || {};
+
+        // Summary + parent quote
+        summaryEl.textContent = rows?.summary_overview?.value || rows?.summary_overview || "—";
+        const pq = (rows?.parent_quote && (rows.parent_quote.quote || rows.parent_quote.value)) || rows.parent_quote || "";
+        quoteEl.textContent = pq ? ('Parent Quote: “' + pq + '”') : "";
+
+        // Traffic lights
+        renderTrafficLights(rows);
+
+        // Recommendations & domains
+        renderRecommendations(rows);
+        renderDomains(rows);
+
+        // Bar chart: prefer rows.domain_scores (array/object)
+        let domain_scores = rows.domain_scores || rows.domain_scores_map || null;
+
+        if (!domain_scores) {
+          // Build domain_scores from domain_* entries if server didn't return domain_scores
+          domain_scores = {};
+          DOMAIN_ORDER.forEach(title => {
+            const k = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+            const r = rows[k] || rows[title] || null;
+            if (r && typeof r === "object") {
+              domain_scores[title] = { percent: (r.percent || null), share: (r.share || null) , value: r.value || null };
+            } else if (r !== null && r !== undefined) {
+              domain_scores[title] = Number(r) || 0;
+            } else {
+              domain_scores[title] = 0;
+            }
+          });
+        }
+
+        renderBurdenChart(domain_scores);
+
+        setStamp();
+        showStatus("Insights generated successfully.", "ok");
       } catch (e) {
-        console.error("Network error:", e);
-        showStatus("Network error while calling analytics API.", "err");
-        summaryEl.textContent = "Network error calling analytics API.";
-        return;
+        console.error("Regenerate failed:", e);
+        showStatus("Failed to generate insights. See console/server logs.", "err");
+        summaryEl.textContent = "Failed to generate insights.";
       }
-      try {
-        data = await res.json();
-      } catch (e) {
-        console.error("Bad JSON from API:", e);
-        showStatus("Analytics API returned non-JSON response.", "err");
-        summaryEl.textContent = "Invalid response from analytics API.";
-        return;
-      }
-
-      if (!data || !data.ok) {
-        console.error("Analytics API error:", data);
-        const msg = (data && data.error) ? data.error : "Unknown LLM failure";
-        showStatus("Error: " + msg, "err");
-        summaryEl.textContent = "Error: " + msg;
-        return;
-      }
-
-      const h = data.header || {};
-      document.getElementById("child-name").textContent = h.child_name || "—";
-      document.getElementById("child-age").textContent = h.child_age || "—";
-      document.getElementById("doi").textContent = h.date_of_interview || "—";
-      document.getElementById("parent").textContent = h.parent_respondent || "—";
-      document.getElementById("interviewer").textContent = h.interviewer || "—";
-      document.getElementById("ref-source").textContent = h.referral_source || "—";
-      if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
-
-      const rows = data.rows || {};
-      summaryEl.textContent = rows?.summary_overview?.value || "—";
-      if (rows?.parent_quote?.quote || rows?.parent_quote?.value) {
-        const q = rows.parent_quote.quote || rows.parent_quote.value;
-        quoteEl.textContent = 'Parent Quote: “' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
-      } else {
-        quoteEl.textContent = "";
-      }
-
-      renderTrafficLights(rows);
-      renderRecommendations(rows);
-      renderDomains(rows);
-      setStamp();
-      showStatus("Insights generated successfully.", "ok");
     }
 
     regenBtn.addEventListener('click', regenerate);
     printBtn.addEventListener('click', () => window.print());
-    saveBtn.addEventListener('click', () => window.print()); // Save as PDF via system dialog
+    saveBtn.addEventListener('click', () => window.print());
 
-    // Load once on entry
+    // Auto-load once
     regenerate();
   </script>
 </body>
