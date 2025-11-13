@@ -1,25 +1,30 @@
-# analytics_routes.py
 """
 Analytics routes - updated:
 - Produces canonical domain objects with both frequency-based and quote-based metrics.
-- Computes frequency percent using weighted formula (always=2, some=1, never=0).
-- Computes quote shares using unique quote counts (de-duplicated with similarity >=85%).
+- Computes frequency percent using weighted formula (always=2, some=1, never=0),
+  normalized by the maximum possible weighted score (2 * total) so percent is in 0..100.
+- Rounds percent, freq_share and quote_share to 1 decimal place to avoid long floats.
 - Exposes both traffic lists and domain_scores for both modes.
+- Adds a new POST /api/analytics/upload endpoint that accepts a file upload
+  (CSV/TSV/JSON/XLSX) and returns the same JSON analytics payload.
+- Cleans up uploaded temporary files after processing.
 """
 import csv
 import json
 import re
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 
-from flask import Blueprint, jsonify, render_template, current_app
+from flask import Blueprint, jsonify, render_template, current_app, request
 
 import difflib
 
 analytics_bp = Blueprint("analytics", __name__, template_folder="templates")
 
 DATA_ROOT = Path("data")
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 CANONICAL_KEYS = [
     "summary_overview",
@@ -480,9 +485,14 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
         n = counts.get("never", 0)
         total = a + s + n
         weighted_sum = 2 * a + 1 * s + 0 * n
-        percent = 0.0
+
+        # normalize percent by maximum possible weighted score (2 * total) so percent is 0..100
         if total > 0:
-            percent = (weighted_sum / float(total)) * 100.0
+            percent = (weighted_sum / float(2 * total)) * 100.0
+        else:
+            percent = 0.0
+        percent = round(percent, 1)
+
         # dedupe quotes and count
         quotes = counts.get("quotes", []) or []
         unique_quotes = _dedupe_quotes(quotes)
@@ -491,7 +501,7 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             "counts": {"always": a, "some": s, "never": n, "unknown": counts.get("unknown", 0)},
             "weighted_sum": weighted_sum,
             "total_count": total,
-            "percent": percent,    # frequency percent (0-100)
+            "percent": percent,    # frequency percent (0-100), rounded
             "unique_quotes": unique_quotes,
             "quote_count": qcount,
             "quote_total_text": " ".join(unique_quotes)
@@ -501,7 +511,7 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
     # compute share for frequency (normalize weighted_sum across domains) and for quotes (normalize quote_count)
     if weighted_totals_sum > 0:
         for domain, info in results.items():
-            info["freq_share"] = (float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0
+            info["freq_share"] = round((float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0, 1)
     else:
         for domain in results:
             results[domain]["freq_share"] = 0.0
@@ -510,7 +520,7 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
     total_quote_count = sum(info["quote_count"] for info in results.values())
     if total_quote_count > 0:
         for domain, info in results.items():
-            info["quote_share"] = (float(info["quote_count"]) / float(total_quote_count)) * 100.0
+            info["quote_share"] = round((float(info["quote_count"]) / float(total_quote_count)) * 100.0, 1)
     else:
         for domain in results:
             results[domain]["quote_share"] = 0.0
@@ -592,43 +602,50 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
             pass
     return header
 
-# ----------------------- API (pure-Python) -----------------------
+# ----------------------- Shared processing helper -----------------------
 
-@analytics_bp.get("/api/analytics/<session_id>")
-def api_generate(session_id):
-    rows, path_used, raw_rows_list = load_filled_rows_for_session(session_id)
-    if not rows:
-        current_app.logger.error("Analytics: no filled rows found for session %s (path=%s)", session_id, path_used)
-        return jsonify({"ok": False, "error": "Missing filled file or no recognizable rows"}), 400
+def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_list: List[Dict[str, Any]], header_meta: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """
+    Build the identical 'rows_out' and 'domain_scores' payload that api_generate returns,
+    given already-mapped canonical rows (mapped_rows) and the raw rows_list.
+    """
+    # normalized: use mapped canonical or empty row
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for k in CANONICAL_KEYS:
+        if k in mapped_rows:
+            normalized[k] = mapped_rows[k]; continue
+        found = None
+        for mk in mapped_rows.keys():
+            if k in mk:
+                found = mk; break
+        if found:
+            normalized[k] = mapped_rows[found]; continue
+        words = k.replace("_", " ").split()
+        best = None
+        for mk in mapped_rows.keys():
+            if all(w.lower() in mk.lower() for w in words[:2]):
+                best = mk; break
+        if best:
+            normalized[k] = mapped_rows[best]; continue
+        normalized[k] = _empty_row()
 
-    # Compute aggregates from raw rows
-    agg = _aggregate_domain_weights_from_rows(raw_rows_list)
+    agg = _aggregate_domain_weights_from_rows(rows_list)
 
     # Build canonical domain objects with both frequency (percent) and quote metrics
     domain_objects: Dict[str, Dict[str, Any]] = {}
     for domain in DOMAIN_CANON:
         info = agg.get(domain, {})
-        # choose a representative value/quote if present in provided rows (rows map)
-        # attempt to find any explicit mapped normalized domain entry in `rows` (domain_* keys)
-        # fallback to derived info
         rep_val = None
         rep_quote = None
-        # try normalized rows mapping (rows keys)
-        for k, v in rows.items():
+        for k, v in normalized.items():
             if not k.startswith("domain_"):
                 continue
-            # match by label
             if domain.lower().replace(" ", "_") in k:
                 rep = v or {}
                 rep_val = rep.get("value") or rep_val
                 rep_quote = rep.get("quote") or rep_quote
-        # fallback to first unique quote if no rep_quote
         if not rep_quote and info.get("unique_quotes"):
             rep_quote = info["unique_quotes"][0] if len(info["unique_quotes"]) > 0 else None
-        # fallback to any text in rows (value)
-        if not rep_val:
-            # try to infer from non-domain canonical keys (summary, parent_quote etc.)
-            rep_val = None
         domain_objects[domain] = {
             "value": rep_val,
             "quote": rep_quote,
@@ -672,7 +689,7 @@ def api_generate(session_id):
     rows_out = {}
     # copy existing canonical keys
     for k in CANONICAL_KEYS:
-        rows_out[k] = rows.get(k, _empty_row())
+        rows_out[k] = normalized.get(k, _empty_row())
 
     # Insert domain_* canonical objects
     for domain_key, domain_name in {
@@ -696,7 +713,7 @@ def api_generate(session_id):
             "quote_share": dobj.get("quote_share", 0.0),
         }
 
-    # Provide traffic lists both as arrays (client handles arrays) and string for backwards compatibility
+    # For convenience: default fields (legacy names) will be frequency-mode lists (so old UI still works)
     def _to_wrap_list(arr):
         if not arr:
             return {"value": None, "quote": None, "confidence": 0.0, "list": [], "text": None}
@@ -710,7 +727,7 @@ def api_generate(session_id):
     rows_out["traffic_quote_some"] = _to_wrap_list(traffic_quote_some)
     rows_out["traffic_quote_no"] = _to_wrap_list(traffic_quote_no)
 
-    # For convenience: default fields (legacy names) will be frequency-mode lists (so old UI still works)
+    # Legacy default
     rows_out["traffic_high"] = rows_out["traffic_freq_high"]
     rows_out["traffic_some"] = rows_out["traffic_freq_some"]
     rows_out["traffic_no"] = rows_out["traffic_freq_no"]
@@ -733,17 +750,109 @@ def api_generate(session_id):
     if "recommendations" not in rows_out or not rows_out["recommendations"].get("value"):
         rows_out["recommendations"] = {"value": None, "quote": None, "confidence": 0.0}
 
-    # persist derived rows for debugging
-    try:
-        outp = (DATA_ROOT / session_id / "analytics_rows_from_filled.json") if (DATA_ROOT / session_id).exists() else (DATA_ROOT / f"{session_id}_analytics_rows_from_filled.json")
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        outp.write_text(json.dumps(rows_out, ensure_ascii=False, indent=2), encoding="utf-8")
-        current_app.logger.info("Analytics: wrote derived rows to %s", outp)
-    except Exception as e:
-        current_app.logger.warning("Analytics: could not persist derived rows: %s", e)
+    # Add header
+    header = header_meta or {
+        "child_name": "—",
+        "child_age": "—",
+        "date_of_interview": datetime.utcnow().strftime("%d %b %Y"),
+        "parent_respondent": "—",
+        "interviewer": "—",
+        "referral_source": "—",
+        "report_title": "Uploaded Data Analytics",
+    }
 
-    header = load_header_metadata(session_id)
-    return jsonify({"ok": True, "header": header, "rows": rows_out})
+    # persist derived rows for debugging (optional)
+    try:
+        uid = str(uuid.uuid4())[:8]
+        outp = DATA_ROOT / f"upload_{uid}_analytics_rows.json"
+        outp.write_text(json.dumps(rows_out, ensure_ascii=False, indent=2), encoding="utf-8")
+        current_app.logger.info("Analytics: wrote derived uploaded rows to %s", outp)
+    except Exception as e:
+        current_app.logger.warning("Analytics: could not persist derived rows for upload: %s", e)
+
+    return {"ok": True, "header": header, "rows": rows_out}
+
+# ----------------------- Upload endpoint -----------------------
+
+@analytics_bp.post("/api/analytics/upload")
+def api_upload_and_generate():
+    """
+    Accepts a multipart-form file upload with key 'file'.
+    Supports csv/tsv/txt/json/xlsx.
+    Returns identical payload shape to /api/analytics/<session_id>.
+    Uploaded file is removed after processing (best-effort).
+    """
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "No file uploaded (use key 'file')"}), 400
+    f = request.files["file"]
+    if f.filename == "":
+        return jsonify({"ok": False, "error": "Empty filename"}), 400
+
+    filename = f.filename
+    suffix = Path(filename).suffix.lower() or ".csv"
+    tmp_path = None
+    try:
+        # write to temp file to reuse existing readers
+        uid = uuid.uuid4().hex
+        tmp_dir = DATA_ROOT / "uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{uid}{suffix}"
+        f.save(str(tmp_path))
+
+        # read rows_list using appropriate reader
+        if suffix in (".csv", ".txt", ".tsv"):
+            rows_list = _read_csv_filled(tmp_path)
+        elif suffix in (".json",):
+            rows_list = _read_json_filled(tmp_path)
+        elif suffix in (".xlsx", ".xls"):
+            rows_list = _read_xlsx_filled(tmp_path)
+        else:
+            rows_list = _read_csv_filled(tmp_path)
+    except Exception as e:
+        current_app.logger.exception("Failed to save/read uploaded file: %s", e)
+        # attempt to remove tmp file if present
+        try:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "Failed to save or parse uploaded file"}), 500
+
+    mapped = _map_row_list_to_dict(rows_list)
+    # optional: build header from first rows or fallback
+    header_meta = {
+        "child_name": "—",
+        "child_age": "—",
+        "date_of_interview": datetime.utcnow().strftime("%d %b %Y"),
+        "parent_respondent": "Uploaded CSV",
+        "interviewer": "—",
+        "referral_source": Path(filename).name,
+        "report_title": "Uploaded Data Analytics",
+    }
+
+    try:
+        response_payload = _process_rows_into_response(mapped, rows_list, header_meta)
+        return jsonify(response_payload)
+    finally:
+        # cleanup uploaded file (best-effort)
+        try:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink()
+                current_app.logger.info("Analytics: removed uploaded temp file %s", tmp_path)
+        except Exception as e:
+            current_app.logger.warning("Analytics: failed to remove uploaded temp file %s: %s", tmp_path, e)
+
+# ----------------------- API (pure-Python) -----------------------
+
+@analytics_bp.get("/api/analytics/<session_id>")
+def api_generate(session_id):
+    rows, path_used, raw_rows_list = load_filled_rows_for_session(session_id)
+    if not rows:
+        current_app.logger.error("Analytics: no filled rows found for session %s (path=%s)", session_id, path_used)
+        return jsonify({"ok": False, "error": "Missing filled file or no recognizable rows"}), 400
+
+    response_payload = _process_rows_into_response(rows, raw_rows_list, load_header_metadata(session_id))
+    return jsonify(response_payload)
 
 # ---- Page ----
 @analytics_bp.get("/analytics/<session_id>")

@@ -76,12 +76,16 @@
         <button id="modeFreq" class="mode active">Use Frequency</button>
         <button id="modeQuotes" class="mode">Use Quotes</button>
       </div>
+      <button id="uploadBtn">Upload CSV</button>
       <button id="regen">Regenerate insights</button>
       <button id="save" class="primary">Save Report</button>
       <button id="print">Print Report</button>
     </div>
 
     <div id="status" class="status"></div>
+
+    <!-- Hidden file input for upload -->
+    <input id="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xls" style="display:none" />
 
     <section class="section">
       <h2>Summary of Key Findings</h2>
@@ -133,6 +137,8 @@
     const printBtn = document.getElementById('print');
     const modeFreqBtn = document.getElementById('modeFreq');
     const modeQuotesBtn = document.getElementById('modeQuotes');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
 
     const statusEl = document.getElementById('status');
     const stampEl = document.getElementById('stamp');
@@ -340,10 +346,12 @@
         const right = badge(level);
         h.appendChild(left); h.appendChild(right); card.appendChild(h);
 
+        // VALUE LINE: show mapped value (if exists) or NA — no percentages are shown here anymore
         const valLine = document.createElement('div');
         valLine.style.fontWeight = '600';
         valLine.style.marginBottom = '6px';
-        valLine.textContent = (obj.value || (obj.freq_percent !== undefined ? (obj.freq_percent + "%") : "—")) || "—";
+        const shownText = obj.value || "NA";
+        valLine.textContent = shownText || "—";
         card.appendChild(valLine);
 
         if (obj.quote) {
@@ -357,9 +365,9 @@
           card.appendChild(q);
         }
 
+        // META: only show number of quotes (no percent)
         const meta = document.createElement('div'); meta.style.marginTop = '8px'; meta.style.color = 'var(--muted)'; meta.style.fontSize = '13px';
-        const shareText = mode === "frequency" ? (Number(obj.freq_share || obj.freq_percent || 0).toFixed(1) + "%") : (Number(obj.quote_share || 0).toFixed(1) + "%");
-        meta.textContent = `Share: ${shareText} • Quotes: ${obj.quote_count || 0}`;
+        meta.textContent = `Quotes: ${obj.quote_count || 0}`;
         card.appendChild(meta);
 
         domainsEl.appendChild(card);
@@ -421,6 +429,72 @@
       }
     }
 
+    async function uploadAndGenerate(file) {
+      if (!file) return;
+      clearStatus();
+      showStatus("Uploading file and generating insights…", "ok");
+      summaryEl.textContent = "Loading…";
+      quoteEl.textContent = "";
+      recsEl.innerHTML = "";
+      domainsEl.innerHTML = "";
+      chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
+
+      try {
+        const form = new FormData();
+        form.append('file', file, file.name);
+
+        const res = await fetch('/api/analytics/upload', {
+          method: 'POST',
+          body: form
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          console.error("Upload failed:", res.status, text);
+          showStatus("Upload failed: " + res.status + " — see server logs", "err");
+          summaryEl.textContent = "Upload failed.";
+          return;
+        }
+
+        const data = await res.json();
+        if (!data || !data.ok) {
+          showStatus("Upload analytics error: " + (data && data.error ? data.error : "unknown"), "err");
+          summaryEl.textContent = "Error processing uploaded file.";
+          return;
+        }
+
+        // reuse same rendering pipeline
+        rows_cache = data.rows || {};
+        const h = data.header || {};
+        document.getElementById("child-name").textContent = h.child_name || "—";
+        document.getElementById("child-age").textContent = h.child_age || "—";
+        document.getElementById("doi").textContent = h.date_of_interview || "—";
+        document.getElementById("parent").textContent = h.parent_respondent || "—";
+        document.getElementById("interviewer").textContent = h.interviewer || "—";
+        document.getElementById("ref-source").textContent = h.referral_source || "—";
+        if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
+
+        summaryEl.textContent = rows_cache?.summary_overview?.value || rows_cache?.summary_overview || "—";
+        const pq = (rows_cache?.parent_quote && (rows_cache.parent_quote.quote || rows_cache.parent_quote.value)) || rows_cache.parent_quote || "";
+        quoteEl.textContent = pq ? ('Parent Quote: “' + pq + '”') : "";
+
+        renderRecommendations(rows_cache);
+        renderTrafficLights(rows_cache, currentMode);
+        renderDomains(rows_cache, currentMode);
+
+        // Chart
+        const domain_scores = rows_cache.domain_scores || {};
+        renderBurdenChart(domain_scores, currentMode);
+
+        setStamp();
+        showStatus("Insights generated from uploaded file.", "ok");
+      } catch (e) {
+        console.error("UploadAndGenerate failed:", e);
+        showStatus("Failed to upload or generate insights. See console/server logs.", "err");
+        summaryEl.textContent = "Failed to upload or generate insights.";
+      }
+    }
+
     modeFreqBtn.addEventListener('click', () => {
       currentMode = "frequency";
       modeFreqBtn.classList.add('active'); modeQuotesBtn.classList.remove('active');
@@ -443,6 +517,16 @@
     regenBtn.addEventListener('click', regenerate);
     printBtn.addEventListener('click', () => window.print());
     saveBtn.addEventListener('click', () => window.print());
+
+    // Upload handlers
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      uploadAndGenerate(f);
+      // clear input so same file can be re-uploaded if needed
+      fileInput.value = "";
+    });
 
     // Auto-load
     regenerate();
