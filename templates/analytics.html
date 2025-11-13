@@ -1,4 +1,4 @@
-<!-- templates/analytics.html -->
+<!-- templates/analytics.html (dynamic x-axis scaling: buffer = max(5, 10% of maxVal)) -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -14,7 +14,7 @@
     }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
-      line-height: 1.4; }
+      line-height: 1.4; -webkit-print-color-adjust: exact; }
     .container { max-width: 980px; margin: 20px auto 64px; padding: 20px; background: var(--card);
       box-shadow: 0 1px 2px rgba(0,0,0,0.04); border-radius: 10px; }
     header h1 { margin: 0 0 4px; font-size: 22px; }
@@ -36,7 +36,8 @@
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff; }
     .chip.hi { background: var(--hi); } .chip.some { background: var(--some); } .chip.no { background: var(--no); }
-    .domains { display: grid; gap: 12px; margin-top: 12px; grid-template-columns: repeat(3, 1fr); }
+    /* Force domains to one column (user asked) */
+    .domains { display: grid; gap: 12px; margin-top: 12px; grid-template-columns: 1fr; }
     .domain-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; min-height:120px; }
     .domain-title { font-weight: 600; margin: 0 0 6px; display:flex; align-items:center; justify-content: space-between; gap: 12px; }
     .domain-badge { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; white-space:nowrap; }
@@ -46,12 +47,22 @@
     .status.show { display:block; }
     .status.ok { background: var(--ok); }
     .status.err { background: var(--err); }
-    canvas { max-width: 100%; }
+    /* Keep canvas size controlled by CSS; avoid setting pixel height from JS */
+    canvas { max-width: 100%; display: block; margin: 8px 0; height: 320px; }
+    /* small helper for quote list */
+    .quotes-list { margin-top: 6px; display: grid; gap: 6px; }
+    .quote-line { color: var(--muted); font-style: italic; font-size: 14px; }
+    .show-more { margin-top: 8px; font-size: 13px; color: #111827; background: transparent; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
+    @media print {
+      .toolbar, .status { display:none !important; }
+      .container { box-shadow:none; border-radius:0; margin:0; }
+      canvas { height: 400px !important; max-height: 400px !important; page-break-inside: avoid; -webkit-print-color-adjust: exact; }
+      .domains { grid-template-columns: 1fr !important; }
+      .domain-card { page-break-inside: avoid; }
+    }
     @media (max-width:900px) {
-      .domains { grid-template-columns: repeat(1, 1fr); }
       .meta { grid-template-columns: repeat(2, 1fr); }
     }
-    @media print { .toolbar, .status { display:none !important; } .container { box-shadow:none; border-radius:0; margin:0; } }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
@@ -105,9 +116,9 @@
 
     <section class="section">
       <h2>Burden of Conversation (Parent-Reported Focus)</h2>
-      <canvas id="burdenChart" height="240"></canvas>
+      <canvas id="burdenChart" width="800" aria-label="Burden chart"></canvas>
       <div style="font-size:12px;color:var(--muted); margin-top:8px;">
-        Chart shows each domain's share (sums ≈ 100%). Use "Use Frequency" or "Use Quotes" to switch modes.
+        Chart shows each domain's share (sums ≈ 100%). Labels printed on bars; use "Use Frequency" or "Use Quotes" to switch modes.
       </div>
     </section>
 
@@ -238,6 +249,7 @@
         values.push(Math.max(0, Number(val)));
       });
 
+      // If the values don't sum to ~100, normalise them to sum 100 (keeps proportions)
       const sum = values.reduce((a,b) => a+b, 0);
       if (sum > 0 && !(Math.abs(sum - 100) <= 1)) {
         for (let i=0;i<values.length;i++) values[i] = (values[i] / sum) * 100;
@@ -246,17 +258,54 @@
       return { labels, values: rounded };
     }
 
-    function renderBurdenChart(domain_scores_obj, mode) {
+    // small custom plugin to draw percent labels on bars (works for horizontal bars)
+    const BarLabelPlugin = {
+      id: 'barLabelPlugin',
+      afterDatasetsDraw(chart, args, pluginOptions) {
+        const ctx = chart.ctx;
+        chart.data.datasets.forEach((dataset, dsIndex) => {
+          const meta = chart.getDatasetMeta(dsIndex);
+          meta.data.forEach((bar, index) => {
+            const val = dataset.data[index];
+            if (val === null || val === undefined) return;
+            const label = (Math.round(Number(val) * 10) / 10) + '%';
+            ctx.save();
+            ctx.font = '12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial';
+            ctx.fillStyle = '#111827';
+            ctx.textBaseline = 'middle';
+            // get bar box
+            const box = bar.getProps(['x','y','width','height'], true);
+            // For horizontal bars, place label at right of bar; if bar is very short, place label after bar with small margin
+            const textX = Math.max(box.x + 6, 6); // ensure we don't write off-canvas
+            const textY = box.y;
+            ctx.fillText(label, textX, textY);
+            ctx.restore();
+          });
+        });
+      }
+    };
+
+    // centralised chart creation - always destroys previous instance
+    function createBurdenChart(labels, values, opts = {}) {
+      // opts: {responsive: true/false, maintainAspectRatio: true/false}
       const canvas = document.getElementById('burdenChart');
-      canvas.style.height = '320px';
-      canvas.height = 320;
       const ctx = canvas.getContext('2d');
-      const { labels, values } = buildChartData(domain_scores_obj, mode);
 
       if (chartInstance) {
-        try { chartInstance.destroy(); } catch (e) {}
+        try { chartInstance.destroy(); } catch (e) { console.warn("destroy err", e); }
         chartInstance = null;
       }
+
+      const responsive = (typeof opts.responsive === 'boolean') ? opts.responsive : true;
+      const maintainAspectRatio = (typeof opts.maintainAspectRatio === 'boolean') ? opts.maintainAspectRatio : true;
+
+      // DYNAMIC AUTO-SCALE X AXIS:
+      // - maxVal: highest bar value
+      // - buffer: at least 5 pts, or 10% of maxVal (so small values still visible)
+      // - suggestedMax = min(100, ceil(maxVal + buffer))
+      const maxVal = (values && values.length) ? Math.max(...values) : 0;
+      const buffer = Math.max(5, Math.ceil(maxVal * 0.10));
+      const suggestedMax = Math.min(100, Math.ceil(maxVal + buffer));
 
       chartInstance = new Chart(ctx, {
         type: 'bar',
@@ -275,14 +324,15 @@
         },
         options: {
           indexAxis: 'y',
-          responsive: true,
-          maintainAspectRatio: true,
-          aspectRatio: 4,
+          responsive: responsive,
+          maintainAspectRatio: maintainAspectRatio,
           scales: {
             x: {
               beginAtZero: true,
-              max: 100,
-              ticks: { callback: (v) => `${v}%` }
+              suggestedMax: suggestedMax,
+              ticks: {
+                callback: (v) => `${v}%`
+              }
             },
             y: {
               ticks: { autoSkip: false },
@@ -296,8 +346,39 @@
               }
             }
           }
+        },
+        plugins: [BarLabelPlugin]
+      });
+
+      return chartInstance;
+    }
+
+    function renderBurdenChart(domain_scores_obj, mode) {
+      const { labels, values } = buildChartData(domain_scores_obj, mode);
+      createBurdenChart(labels, values, { responsive: true, maintainAspectRatio: true });
+    }
+
+    // before print: expand all quote lists programmatically and redraw chart as non-responsive (fixed pixels)
+    function beforePrintHandler() {
+      document.querySelectorAll('.show-more').forEach(btn => {
+        const container = btn.previousElementSibling;
+        if (container && container.dataset && container.dataset.collapsed === "true") {
+          btn.click();
         }
       });
+      const domain_scores = rows_cache?.domain_scores || {};
+      const { labels, values } = buildChartData(domain_scores, currentMode);
+      // recreate chart non-responsive for print stability using the same dynamic scaling
+      createBurdenChart(labels, values, { responsive: false, maintainAspectRatio: true });
+    }
+    function afterPrintHandler() {
+      const domain_scores = rows_cache?.domain_scores || {};
+      const { labels, values } = buildChartData(domain_scores, currentMode);
+      createBurdenChart(labels, values, { responsive: true, maintainAspectRatio: true });
+    }
+    if (window.matchMedia) {
+      window.addEventListener('beforeprint', beforePrintHandler);
+      window.addEventListener('afterprint', afterPrintHandler);
     }
 
     function renderTrafficLights(rows, mode) {
@@ -341,9 +422,55 @@
       });
     }
 
+    // Helper to create a show-more toggle and manage collapsing
+    function makeShowMore(quotesContainer, allQuotes) {
+      const MAX_VISIBLE = 6;
+      if (!allQuotes || allQuotes.length <= MAX_VISIBLE) {
+        quotesContainer.dataset.collapsed = "false";
+        allQuotes.forEach(q => {
+          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
+          quotesContainer.appendChild(qdiv);
+        });
+        return;
+      }
+      quotesContainer.dataset.collapsed = "true";
+      const visible = allQuotes.slice(0, MAX_VISIBLE);
+      visible.forEach(q => {
+        const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+        qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
+        quotesContainer.appendChild(qdiv);
+      });
+      const hiddenContainer = document.createElement('div');
+      hiddenContainer.style.display = 'none';
+      hiddenContainer.className = 'hidden-quotes';
+      allQuotes.slice(MAX_VISIBLE).forEach(q => {
+        const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+        qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
+        hiddenContainer.appendChild(qdiv);
+      });
+      quotesContainer.appendChild(hiddenContainer);
+      const btn = document.createElement('button');
+      btn.className = 'show-more';
+      btn.textContent = `Show ${allQuotes.length - MAX_VISIBLE} more`;
+      btn.addEventListener('click', (ev) => {
+        const collapsed = quotesContainer.dataset.collapsed === "true";
+        if (collapsed) {
+          hiddenContainer.style.display = '';
+          btn.textContent = 'Show less';
+          quotesContainer.dataset.collapsed = "false";
+        } else {
+          hiddenContainer.style.display = 'none';
+          btn.textContent = `Show ${allQuotes.length - MAX_VISIBLE} more`;
+          quotesContainer.dataset.collapsed = "true";
+        }
+      });
+      quotesContainer.appendChild(btn);
+    }
+
     function renderDomains(rows, mode) {
       domainsEl.innerHTML = "";
-      const domain_objects = rows.domain_objects || rows.domain_objects || {};
+      const domain_objects = rows.domain_objects || {};
       for (const title of DOMAIN_ORDER) {
         const obj = domain_objects[title] || (rows['domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_')] || {});
         const card = document.createElement('div'); card.className = "domain-card";
@@ -356,7 +483,7 @@
         const right = badge(level);
         h.appendChild(left); h.appendChild(right); card.appendChild(h);
 
-        // VALUE LINE: show mapped value (if exists) or NA — no percentages are shown here anymore
+        // VALUE LINE
         const valLine = document.createElement('div');
         valLine.style.fontWeight = '600';
         valLine.style.marginBottom = '6px';
@@ -364,20 +491,32 @@
         valLine.textContent = shownText || "—";
         card.appendChild(valLine);
 
-        if (obj.quote) {
-          const q = document.createElement('div'); q.className = "quote";
-          q.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
-          card.appendChild(q);
-        } else {
-          const q = document.createElement('div'); q.className = "quote";
-          q.style.opacity = 0.8;
-          q.textContent = "—";
-          card.appendChild(q);
+        // QUOTES
+        let quotesList = Array.isArray(obj.unique_quotes) ? obj.unique_quotes : (obj.unique_quotes ? [obj.unique_quotes] : []);
+        if (!quotesList.length && obj.all_quotes_text) {
+          quotesList = String(obj.all_quotes_text || "").split(/(?<=\.)\s+/).map(s => s.trim()).filter(Boolean);
         }
 
-        // META: only show number of quotes (no percent)
+        const quotesContainer = document.createElement('div');
+        quotesContainer.className = 'quotes-list';
+        if (quotesList.length) {
+          makeShowMore(quotesContainer, quotesList);
+        } else if (obj.quote) {
+          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          qdiv.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
+          quotesContainer.appendChild(qdiv);
+        } else {
+          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          qdiv.style.opacity = 0.8;
+          qdiv.textContent = "—";
+          quotesContainer.appendChild(qdiv);
+        }
+        card.appendChild(quotesContainer);
+
+        // META
         const meta = document.createElement('div'); meta.style.marginTop = '8px'; meta.style.color = 'var(--muted)'; meta.style.fontSize = '13px';
-        meta.textContent = `Quotes: ${obj.quote_count || 0}`;
+        const quoteCount = Number(obj.quote_count || (quotesList.length)) || 0;
+        meta.textContent = `Quotes: ${quoteCount}`;
         card.appendChild(meta);
 
         domainsEl.appendChild(card);
@@ -511,7 +650,8 @@
       if (rows_cache) {
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
-        renderBurdenChart(rows_cache.domain_scores || {}, currentMode);
+        const domain_scores = rows_cache.domain_scores || {};
+        renderBurdenChart(domain_scores, currentMode);
       }
     });
     modeQuotesBtn.addEventListener('click', () => {
@@ -520,13 +660,20 @@
       if (rows_cache) {
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
-        renderBurdenChart(rows_cache.domain_scores || {}, currentMode);
+        const domain_scores = rows_cache.domain_scores || {};
+        renderBurdenChart(domain_scores, currentMode);
       }
     });
 
     regenBtn.addEventListener('click', regenerate);
-    printBtn.addEventListener('click', () => window.print());
-    saveBtn.addEventListener('click', () => window.print());
+    printBtn.addEventListener('click', () => {
+      beforePrintHandler();
+      setTimeout(() => window.print(), 150);
+    });
+    saveBtn.addEventListener('click', () => {
+      beforePrintHandler();
+      setTimeout(() => window.print(), 150);
+    });
 
     // Upload handlers
     uploadBtn.addEventListener('click', () => fileInput.click());
@@ -534,7 +681,6 @@
       const f = ev.target.files && ev.target.files[0];
       if (!f) return;
       uploadAndGenerate(f);
-      // clear input so same file can be re-uploaded if needed
       fileInput.value = "";
     });
 

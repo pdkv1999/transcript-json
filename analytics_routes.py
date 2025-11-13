@@ -7,7 +7,9 @@ Analytics routes - updated:
 - Exposes both traffic lists and domain_scores for both modes.
 - Adds a new POST /api/analytics/upload endpoint that accepts a file upload
   (CSV/TSV/JSON/XLSX) and returns the same JSON analytics payload.
-- Cleans up uploaded temporary files after processing.
+- Cleans up uploaded temporary files after processing (best-effort).
+- Includes deduplicated unique quotes and concatenated all_quotes_text per domain.
+- Stricter dedupe (threshold 0.90) and caps returned unique quotes to 12 per domain.
 """
 import csv
 import json
@@ -441,8 +443,9 @@ def _normalize_quote_text(q: str) -> str:
     s = s.lower().strip()
     return s
 
-def _dedupe_quotes(quotes: List[str], threshold: float = 0.85) -> List[str]:
-    """Dedupe by similarity >= threshold using difflib.SequenceMatcher"""
+def _dedupe_quotes(quotes: List[str], threshold: float = 0.90) -> List[str]:
+    """Dedupe by similarity >= threshold using difflib.SequenceMatcher.
+    Higher threshold (0.90) to collapse near-duplicates more aggressively."""
     unique = []
     for q in quotes:
         nq = _normalize_quote_text(q)
@@ -536,15 +539,21 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
         # dedupe quotes and count
         quotes = counts.get("quotes", []) or []
         unique_quotes = _dedupe_quotes(quotes)
-        qcount = len(unique_quotes)
+        # cap quotes returned per domain to avoid huge payloads (server-side cap)
+        MAX_QUOTES_PER_DOMAIN = 12
+        if len(unique_quotes) > MAX_QUOTES_PER_DOMAIN:
+            truncated = unique_quotes[:MAX_QUOTES_PER_DOMAIN]
+        else:
+            truncated = unique_quotes
+        qcount = len(unique_quotes)  # real count of deduped quotes
         results[domain] = {
             "counts": {"always": a, "some": s, "never": n, "unknown": counts.get("unknown", 0)},
             "weighted_sum": weighted_sum,
             "total_count": total,
             "percent": percent,    # frequency percent (0-100), rounded
-            "unique_quotes": unique_quotes,
+            "unique_quotes": truncated,  # truncated list (up to MAX_QUOTES_PER_DOMAIN)
             "quote_count": qcount,
-            "quote_total_text": " ".join(unique_quotes)
+            "quote_total_text": " ".join(unique_quotes)  # full deduped text
         }
         weighted_totals_sum += weighted_sum
 
@@ -659,7 +668,7 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
             if k in mk:
                 found = mk; break
         if found:
-            normalized[k] = mapped_rows[found]; continue
+            normalized[k] = mapped[found]; continue
         words = k.replace("_", " ").split()
         best = None
         for mk in mapped_rows.keys():
@@ -686,6 +695,7 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
                 rep_quote = rep.get("quote") or rep_quote
         if not rep_quote and info.get("unique_quotes"):
             rep_quote = info["unique_quotes"][0] if len(info["unique_quotes"]) > 0 else None
+
         domain_objects[domain] = {
             "value": rep_val,
             "quote": rep_quote,
@@ -694,7 +704,8 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
             "freq_share": info.get("freq_share", 0.0),
             "quote_count": info.get("quote_count", 0),
             "quote_share": info.get("quote_share", 0.0),
-            "unique_quotes": info.get("unique_quotes", [])
+            "unique_quotes": info.get("unique_quotes", []) if isinstance(info.get("unique_quotes", []), list) else [],
+            "all_quotes_text": info.get("quote_total_text", "")
         }
 
     # Derive traffic lists for frequency and for quotes
@@ -731,7 +742,7 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
     for k in CANONICAL_KEYS:
         rows_out[k] = normalized.get(k, _empty_row())
 
-    # Insert domain_* canonical objects
+    # Insert domain_* canonical objects (include full unique_quotes and all_quotes_text)
     for domain_key, domain_name in {
         "domain_attention_adhd": "Attention / ADHD",
         "domain_learning_dyslexia": "Learning / Dyslexia",
@@ -742,7 +753,6 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
         "domain_eating": "Eating",
     }.items():
         dobj = domain_objects.get(domain_name, {})
-        # fill a JSON-serializable object
         rows_out[domain_key] = {
             "value": dobj.get("value"),
             "quote": dobj.get("quote"),
@@ -751,6 +761,8 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
             "freq_share": dobj.get("freq_share", 0.0),
             "quote_count": dobj.get("quote_count", 0),
             "quote_share": dobj.get("quote_share", 0.0),
+            "unique_quotes": dobj.get("unique_quotes", []),
+            "all_quotes_text": dobj.get("all_quotes_text", "")
         }
 
     # For convenience: default fields (legacy names) will be frequency-mode lists (so old UI still works)
