@@ -26,6 +26,7 @@ analytics_bp = Blueprint("analytics", __name__, template_folder="templates")
 DATA_ROOT = Path("data")
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
+# canonical keys (keep domain_* keys aligned with DOMAIN_CANON below)
 CANONICAL_KEYS = [
     "summary_overview",
     "parent_quote",
@@ -33,33 +34,62 @@ CANONICAL_KEYS = [
     "traffic_some",
     "traffic_no",
     "recommendations",
-    "domain_attention_adhd",
-    "domain_learning_dyslexia",
-    "domain_sleep",
-    "domain_motor_skills",
     "domain_anxiety_emotion",
-    "domain_social_communication",
+    "domain_attention_adhd",
+    "domain_autism",
+    "domain_behaviour",
+    "domain_care_history",
+    "domain_developmental_history",
     "domain_eating",
+    "domain_home_life_routine",
+    "domain_learning_dyslexia",
+    "domain_motor_skills",
+    "domain_other",
+    "domain_parents_goal",
+    "domain_school_life",
+    "domain_sleep",
+    "domain_social_communication",
+    "domain_strengths_interests",
 ]
 
+# authoritative list + display names / order
 DOMAIN_CANON = [
-    "Attention / ADHD",
-    "Learning / Dyslexia",
-    "Sleep",
-    "Motor Skills",
     "Anxiety / Emotion",
-    "Social / Communication",
+    "Attention / ADHD",
+    "Autism",
+    "Behaviour",
+    "Care History",
+    "Developmental History",
     "Eating",
+    "Home Life / Routine",
+    "Learning / Dyslexia",
+    "Motor Skills",
+    "Other",
+    "Parent's Goal for this Assessment",
+    "School Life",
+    "Sleep",
+    "Social / Communication",
+    "Strengths / Interests",
 ]
 
+# keywords used to auto-assign raw rows into domains — add or tune as needed
 DOMAIN_KEYWORDS = {
+    "Anxiety / Emotion": ["anxi", "worry", "emotion", "mood", "sad", "tear", "fear", "panic", "stress"],
     "Attention / ADHD": ["attention", "adhd", "hyper", "focus", "distract", "concentrat"],
+    "Autism": ["autis", "asperg", "stereotyp", "sensory", "repetit", "meltdo", "social communication"],
+    "Behaviour": ["behaviour", "behavior", "behav", "tantrum", "aggress", "rule", "routine", "challeng"],
+    "Care History": ["care history", "caregiver", "foster", "placement", "care history", "guardian"],
+    "Developmental History": ["development", "milestone", "delay", "developmental", "walk", "talk", "sit", "crawl"],
+    "Eating": ["eat", "feeding", "food", "weight", "appetite", "swallow", "mealtime"],
+    "Home Life / Routine": ["home", "routine", "bedtime routine", "family", "siblings", "house", "routine"],
     "Learning / Dyslexia": ["learn", "dyslex", "reading", "spelling", "school", "education", "homework"],
-    "Sleep": ["sleep", "bed", "night", "insomnia", "nap", "tired"],
     "Motor Skills": ["motor", "coordina", "climb", "fine motor", "gross motor", "hand", "balance"],
-    "Anxiety / Emotion": ["anxi", "worry", "emotion", "mood", "sad", "tear", "fear", "panic"],
+    "Other": ["other", "misc", "additional", "note", "info"],
+    "Parent's Goal for this Assessment": ["goal", "aim", "parents goal", "parent's goal", "objective", "what parent wants"],
+    "School Life": ["school", "class", "teacher", "peer", "homework", "attendance"],
+    "Sleep": ["sleep", "bed", "night", "insomnia", "nap", "tired"],
     "Social / Communication": ["social", "friend", "communic", "talk", "speech", "language", "play", "peer"],
-    "Eating": ["eat", "feeding", "food", "weight", "appetite", "swallow"],
+    "Strengths / Interests": ["strength", "interest", "likes", "hobby", "talent", "strengths"],
 }
 
 # ---------------------- helpers ----------------------
@@ -322,14 +352,24 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
     domain_candidates = _find_domain_rows_in_raw_rows(rows_list)
 
     domain_key_map = {
-        "domain_attention_adhd": "Attention / ADHD",
-        "domain_learning_dyslexia": "Learning / Dyslexia",
-        "domain_sleep": "Sleep",
-        "domain_motor_skills": "Motor Skills",
         "domain_anxiety_emotion": "Anxiety / Emotion",
-        "domain_social_communication": "Social / Communication",
+        "domain_attention_adhd": "Attention / ADHD",
+        "domain_autism": "Autism",
+        "domain_behaviour": "Behaviour",
+        "domain_care_history": "Care History",
+        "domain_developmental_history": "Developmental History",
         "domain_eating": "Eating",
+        "domain_home_life_routine": "Home Life / Routine",
+        "domain_learning_dyslexia": "Learning / Dyslexia",
+        "domain_motor_skills": "Motor Skills",
+        "domain_other": "Other",
+        "domain_parents_goal": "Parent's Goal for this Assessment",
+        "domain_school_life": "School Life",
+        "domain_sleep": "Sleep",
+        "domain_social_communication": "Social / Communication",
+        "domain_strengths_interests": "Strengths / Interests",
     }
+
 
     # helper pick best candidate (prefers explicit freq/quote)
     def _pick_best_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
