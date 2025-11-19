@@ -27,6 +27,20 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
+# ----------- AUTO-FLUSH DATA & UPLOADS ON STARTUP ----------- #
+def flush_startup_dirs():
+    for d in [UPLOAD_DIR, DATA_DIR]:
+        try:
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+            logging.info(f"Flushed and recreated: {d}")
+        except Exception as e:
+            logging.error(f"Could not flush directory {d}: {e}")
+
+flush_startup_dirs()
+# ------------------------------------------------------------- #
+
 # Ensure dirs exist
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)

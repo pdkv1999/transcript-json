@@ -1,4 +1,4 @@
-<!-- templates/analytics.html (dynamic x-axis scaling: buffer = max(5, 10% of maxVal)) -->
+<!-- templates/analytics.html -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -12,54 +12,130 @@
       --bg: #ffffff; --card: #ffffff;
       --ok: #ecfdf5; --err: #fee2e2;
     }
-    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    html, body {
+      margin: 0; padding: 0; background: var(--bg); color: var(--ink);
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
-      line-height: 1.4; -webkit-print-color-adjust: exact; }
-    .container { max-width: 980px; margin: 20px auto 64px; padding: 20px; background: var(--card);
-      box-shadow: 0 1px 2px rgba(0,0,0,0.04); border-radius: 10px; }
+      line-height: 1.4; -webkit-print-color-adjust: exact;
+    }
+    .container {
+      max-width: 980px; margin: 20px auto 64px; padding: 20px; background: var(--card);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04); border-radius: 10px;
+    }
     header h1 { margin: 0 0 4px; font-size: 22px; }
     header p { margin: 0; color: var(--muted); }
-    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 14px; margin-top: 10px;
-      padding-top: 10px; border-top: 1px solid var(--line); font-size: 14px; }
+    .meta {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 14px; margin-top: 10px;
+      padding-top: 10px; border-top: 1px solid var(--line); font-size: 14px;
+    }
     .meta div span { color: var(--muted); }
-    .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 18px;
-      position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10; }
+
+    .toolbar {
+      display: flex; gap: 8px; justify-content: flex-end; margin: 12px 0 18px;
+      position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 10;
+    }
     .mode-controls { margin-right: auto; display:flex; gap:8px; align-items:center; }
-    button { border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+
+    button {
+      border: 1px solid var(--line); background: #fff;
+      border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer;
+    }
     button.primary { background: #111827; color: #fff; border-color: #111827; }
     button.mode { background:#fff; border-radius:6px; padding:6px 10px; font-size:13px; }
     button.mode.active { background:#111827; color:#fff; border-color:#111827; }
+
     .section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
     .section h2 { font-size: 16px; margin: 0 0 8px; }
-    .summary { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 15px; min-height: 56px; }
+
+    .summary {
+      white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px; font-size: 15px; min-height: 56px;
+    }
     .quote { color: var(--muted); font-style: italic; margin-top: 8px; }
+
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .chip { border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff; }
-    .chip.hi { background: var(--hi); } .chip.some { background: var(--some); } .chip.no { background: var(--no); }
-    /* Force domains to one column (user asked) */
-    .domains { display: grid; gap: 12px; margin-top: 12px; grid-template-columns: 1fr; }
-    .domain-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; min-height:120px; }
-    .domain-title { font-weight: 600; margin: 0 0 6px; display:flex; align-items:center; justify-content: space-between; gap: 12px; }
-    .domain-badge { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: #fff; margin-left: 8px; white-space:nowrap; }
-    .badge-hi { background: var(--hi); } .badge-some { background: var(--some); } .badge-no { background: var(--no); }
-    .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
-    .status { padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; display:none; }
+    .chip {
+      border-radius: 999px; padding: 6px 10px; font-size: 13px; color: #fff;
+    }
+    .chip.hi { background: var(--hi); }
+    .chip.some { background: var(--some); }
+    .chip.no { background: var(--no); }
+
+    /* Domains one column */
+    .domains {
+      display: grid; gap: 12px; margin-top: 12px; grid-template-columns: 1fr;
+    }
+    .domain-card {
+      border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+      background: #fff; min-height:120px;
+    }
+    .domain-title {
+      font-weight: 600; margin: 0 0 6px; display:flex;
+      align-items:center; justify-content: space-between; gap: 12px;
+    }
+    .domain-badge {
+      display: inline-block; padding: 6px 10px; border-radius: 999px;
+      font-size: 12px; color: #fff; margin-left: 8px; white-space:nowrap;
+    }
+    .badge-hi { background: var(--hi); }
+    .badge-some { background: var(--some); }
+    .badge-no { background: var(--no); }
+
+    .foot {
+      display: flex; justify-content: space-between; align-items: center;
+      color: var(--muted); font-size: 12px; margin-top: 16px;
+    }
+
+    .status {
+      padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; display:none;
+    }
     .status.show { display:block; }
     .status.ok { background: var(--ok); }
     .status.err { background: var(--err); }
-    /* Keep canvas size controlled by CSS; avoid setting pixel height from JS */
-    canvas { max-width: 100%; display: block; margin: 8px 0; height: 320px; }
-    /* small helper for quote list */
+
+    canvas {
+      max-width: 100%; display: block; margin: 8px 0; height: 320px;
+    }
+
     .quotes-list { margin-top: 6px; display: grid; gap: 6px; }
-    .quote-line { color: var(--muted); font-style: italic; font-size: 14px; }
-    .show-more { margin-top: 8px; font-size: 13px; color: #111827; background: transparent; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
+    .quote-line {
+      color: var(--muted); font-style: italic; font-size: 14px;
+    }
+    .show-more {
+      margin-top: 8px; font-size: 13px; color: #111827;
+      background: transparent; border: none; cursor: pointer;
+      text-decoration: underline; padding: 0;
+    }
+
     @media print {
       .toolbar, .status { display:none !important; }
       .container { box-shadow:none; border-radius:0; margin:0; }
-      canvas { height: 400px !important; max-height: 400px !important; page-break-inside: avoid; -webkit-print-color-adjust: exact; }
+
+      /* Each major section on its own page */
+      .page-break {
+        page-break-before: always;
+        break-before: page;
+      }
+
+      canvas {
+        height: 400px !important;
+        max-height: 400px !important;
+        page-break-inside: avoid;
+        -webkit-print-color-adjust: exact;
+        display: block;
+      }
+
       .domains { grid-template-columns: 1fr !important; }
       .domain-card { page-break-inside: avoid; }
+
+      /* 🔹 In print: show all quotes, hide the "Show more" button */
+      .hidden-quotes {
+        display: block !important;
+      }
+      .show-more {
+        display: none !important;
+      }
     }
+
     @media (max-width:900px) {
       .meta { grid-template-columns: repeat(2, 1fr); }
     }
@@ -71,7 +147,6 @@
   <div class="container" id="report-root">
     <header>
       <h1 id="report-title">{{ header.get('report_title', 'Analytics Report') }}</h1>
-      <p>Parent Telephone Interview Summary</p>
       <div class="meta" id="meta">
         <div><span>Child Name:</span> <b id="child-name">{{ header.get('child_name', '—') }}</b></div>
         <div><span>Age:</span> <b id="child-age">{{ header.get('child_age', '—') }}</b></div>
@@ -104,7 +179,7 @@
       <div id="parent-quote" class="quote"></div>
     </section>
 
-    <section class="section">
+    <section class="section page-break">
       <h2>Traffic-Light Summary of Concerns</h2>
       <div><b>High Concerns:</b> <span id="tl-high">—</span></div>
       <div style="margin-top:6px;"><b>Some Concerns:</b> <span id="tl-some">—</span></div>
@@ -114,21 +189,22 @@
       <div class="chips" id="chips-no" style="margin-top:6px;"></div>
     </section>
 
-    <section class="section">
+    <section class="section page-break">
       <h2>Burden of Conversation (Parent-Reported Focus)</h2>
       <canvas id="burdenChart" width="800" aria-label="Burden chart"></canvas>
       <div style="font-size:12px;color:var(--muted); margin-top:8px;">
-        Chart shows each domain's share (sums ≈ 100%). Labels printed on bars; use "Use Frequency" or "Use Quotes" to switch modes.
+        Chart shows each domain's share (sums ≈ 100%). Labels printed on bars; use
+        "Use Frequency" or "Use Quotes" to switch modes.
       </div>
     </section>
 
-    <section class="section">
+    <section class="section page-break">
       <h2>Recommendations and Next Steps (Based on Parent Concerns)</h2>
       <ul id="recs" style="margin:0; padding-left:20px;"></ul>
     </section>
 
-    <section class="section">
-      <h2>Page 2 – Domain-Specific Notes & Quotes</h2>
+    <section class="section page-break">
+      <h2>Domain-Specific Notes & Quotes</h2>
       <div class="domains" id="domains"></div>
     </section>
 
@@ -191,12 +267,14 @@
       "Strengths / Interests"
     ];
 
-
     function showStatus(msg, type="ok") {
       statusEl.textContent = msg;
       statusEl.className = `status show ${type === "err" ? "err" : "ok"}`;
     }
-    function clearStatus() { statusEl.className = "status"; statusEl.textContent = ""; }
+    function clearStatus() {
+      statusEl.className = "status";
+      statusEl.textContent = "";
+    }
     function setStamp() {
       const dt = new Date();
       stampEl.textContent = "Last generated: " +
@@ -206,19 +284,34 @@
 
     function parseList(value) {
       if (!value) return [];
-      if (Array.isArray(value)) return value;
-      const raw = String(value).split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+      if (Array.isArray(value)) return value.map(v => String(v));
+      const raw = String(value)
+        .split(/\r?\n|,/)
+        .map(s => s.trim())
+        .filter(Boolean);
       const seen = new Set(); const out = [];
-      for (const s of raw) { if (!seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); } }
+      for (const s of raw) {
+        const key = s.toLowerCase();
+        if (!seen.has(key)) { seen.add(key); out.push(s); }
+      }
       return out;
     }
 
-    function chip(text, cls) { const d = document.createElement('div'); d.className = `chip ${cls}`; d.textContent = text; return d; }
+    function chip(text, cls) {
+      const d = document.createElement('div');
+      d.className = `chip ${cls}`;
+      d.textContent = text;
+      return d;
+    }
 
     function badge(level) {
       const span = document.createElement('span');
-      span.className = "domain-badge " + (level === "high" ? "badge-hi" : level === "some" ? "badge-some" : "badge-no");
-      span.textContent = level === "high" ? "High concern" : level === "some" ? "Some concern" : "No concern";
+      span.className = "domain-badge " +
+        (level === "high" ? "badge-hi" : level === "some" ? "badge-some" : "badge-no");
+      span.textContent =
+        level === "high" ? "High concern" :
+        level === "some" ? "Some concern" :
+        "No concern";
       return span;
     }
 
@@ -237,8 +330,9 @@
       DOMAIN_ORDER.forEach(d => {
         let val = 0;
         const entry = domain_scores_obj && domain_scores_obj[d];
-        if (!entry) { val = 0; }
-        else {
+        if (!entry) {
+          val = 0;
+        } else {
           if (mode === "frequency") {
             val = Number(entry.freq_share || entry.freq_percent || 0);
           } else {
@@ -249,7 +343,6 @@
         values.push(Math.max(0, Number(val)));
       });
 
-      // If the values don't sum to ~100, normalise them to sum 100 (keeps proportions)
       const sum = values.reduce((a,b) => a+b, 0);
       if (sum > 0 && !(Math.abs(sum - 100) <= 1)) {
         for (let i=0;i<values.length;i++) values[i] = (values[i] / sum) * 100;
@@ -258,7 +351,6 @@
       return { labels, values: rounded };
     }
 
-    // small custom plugin to draw percent labels on bars (works for horizontal bars)
     const BarLabelPlugin = {
       id: 'barLabelPlugin',
       afterDatasetsDraw(chart, args, pluginOptions) {
@@ -273,10 +365,8 @@
             ctx.font = '12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial';
             ctx.fillStyle = '#111827';
             ctx.textBaseline = 'middle';
-            // get bar box
             const box = bar.getProps(['x','y','width','height'], true);
-            // For horizontal bars, place label at right of bar; if bar is very short, place label after bar with small margin
-            const textX = Math.max(box.x + 6, 6); // ensure we don't write off-canvas
+            const textX = Math.max(box.x + 6, 6);
             const textY = box.y;
             ctx.fillText(label, textX, textY);
             ctx.restore();
@@ -285,9 +375,7 @@
       }
     };
 
-    // centralised chart creation - always destroys previous instance
     function createBurdenChart(labels, values, opts = {}) {
-      // opts: {responsive: true/false, maintainAspectRatio: true/false}
       const canvas = document.getElementById('burdenChart');
       const ctx = canvas.getContext('2d');
 
@@ -296,13 +384,11 @@
         chartInstance = null;
       }
 
-      const responsive = (typeof opts.responsive === 'boolean') ? opts.responsive : true;
-      const maintainAspectRatio = (typeof opts.maintainAspectRatio === 'boolean') ? opts.maintainAspectRatio : true;
+      const responsive =
+        (typeof opts.responsive === 'boolean') ? opts.responsive : true;
+      const maintainAspectRatio =
+        (typeof opts.maintainAspectRatio === 'boolean') ? opts.maintainAspectRatio : true;
 
-      // DYNAMIC AUTO-SCALE X AXIS:
-      // - maxVal: highest bar value
-      // - buffer: at least 5 pts, or 10% of maxVal (so small values still visible)
-      // - suggestedMax = min(100, ceil(maxVal + buffer))
       const maxVal = (values && values.length) ? Math.max(...values) : 0;
       const buffer = Math.max(5, Math.ceil(maxVal * 0.10));
       const suggestedMax = Math.min(100, Math.ceil(maxVal + buffer));
@@ -358,24 +444,36 @@
       createBurdenChart(labels, values, { responsive: true, maintainAspectRatio: true });
     }
 
-    // before print: expand all quote lists programmatically and redraw chart as non-responsive (fixed pixels)
     function beforePrintHandler() {
-      document.querySelectorAll('.show-more').forEach(btn => {
-        const container = btn.previousElementSibling;
-        if (container && container.dataset && container.dataset.collapsed === "true") {
-          btn.click();
+      // Expand all quote blocks (for PDF)
+      document.querySelectorAll('.hidden-quotes').forEach(el => {
+        el.style.display = '';        // make sure they are visible
+      });
+      document.querySelectorAll('.quotes-list').forEach(container => {
+        if (container.dataset) {
+          container.dataset.collapsed = "false";
         }
       });
-      const domain_scores = rows_cache?.domain_scores || {};
-      const { labels, values } = buildChartData(domain_scores, currentMode);
-      // recreate chart non-responsive for print stability using the same dynamic scaling
-      createBurdenChart(labels, values, { responsive: false, maintainAspectRatio: true });
+
+      // Just ensure the existing chart knows its size – don't recreate it
+      if (chartInstance) {
+        try {
+          chartInstance.resize();
+        } catch (e) {
+          console.warn("Chart resize before print failed:", e);
+        }
+      }
     }
     function afterPrintHandler() {
-      const domain_scores = rows_cache?.domain_scores || {};
-      const { labels, values } = buildChartData(domain_scores, currentMode);
-      createBurdenChart(labels, values, { responsive: true, maintainAspectRatio: true });
+      if (chartInstance) {
+        try {
+          chartInstance.resize();
+        } catch (e) {
+          console.warn("Chart resize after print failed:", e);
+        }
+      }
     }
+
     if (window.matchMedia) {
       window.addEventListener('beforeprint', beforePrintHandler);
       window.addEventListener('afterprint', afterPrintHandler);
@@ -383,7 +481,6 @@
 
     function renderTrafficLights(rows, mode) {
       chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
-      // use server-provided lists: traffic_freq_* or traffic_quote_*
       let hiList = [], someList = [], noList = [];
       if (mode === "frequency") {
         hiList = rows?.traffic_freq_high?.list || parseList(rows?.traffic_freq_high?.value);
@@ -395,12 +492,20 @@
         noList = rows?.traffic_quote_no?.list || parseList(rows?.traffic_quote_no?.value);
       }
 
-      // ensure no duplication across lists: prefer hi > some > no
       const deduped = new Set();
       const finalHi = [], finalSome = [], finalNo = [];
-      for (const x of hiList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalHi.push(x); } }
-      for (const x of someList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalSome.push(x); } }
-      for (const x of noList || []) { if (!deduped.has(x.toLowerCase())) { deduped.add(x.toLowerCase()); finalNo.push(x); } }
+      for (const x of hiList || []) {
+        const key = String(x).toLowerCase();
+        if (!deduped.has(key)) { deduped.add(key); finalHi.push(String(x)); }
+      }
+      for (const x of someList || []) {
+        const key = String(x).toLowerCase();
+        if (!deduped.has(key)) { deduped.add(key); finalSome.push(String(x)); }
+      }
+      for (const x of noList || []) {
+        const key = String(x).toLowerCase();
+        if (!deduped.has(key)) { deduped.add(key); finalNo.push(String(x)); }
+      }
 
       tlHighEl.textContent = finalHi.length ? finalHi.join(", ") : "—";
       tlSomeEl.textContent = finalSome.length ? finalSome.join(", ") : "—";
@@ -411,24 +516,41 @@
       finalNo.forEach(x => chipsNo.appendChild(chip(x, "no")));
     }
 
-    function renderRecommendations(rows) {
+    function renderRecommendations(rows, mode) {
       recsEl.innerHTML = "";
-      const items = parseList(rows?.recommendations?.value || rows?.recommendations || "");
+
+      // choose correct source based on mode
+      let src = (mode === "quotes")
+          ? rows?.recommendations_quotes || rows?.recommendations
+          : rows?.recommendations_freq || rows?.recommendations;
+
+      // IMPORTANT: Use backend-provided list directly
+      let items = Array.isArray(src?.list) ? src.list : [];
+
+      // If empty
       if (!items.length) {
-        const li = document.createElement('li'); li.textContent = "—"; recsEl.appendChild(li); return;
+        recsEl.innerHTML = "<ol><li>—</li></ol>";
+        return;
       }
+
+      // Create NUMBERED LIST
+      const ol = document.createElement("ol");   // ← numbering instead of bullets
       items.forEach(line => {
-        const li = document.createElement('li'); li.textContent = line; recsEl.appendChild(li);
+        const li = document.createElement("li");
+        li.textContent = line;                   // one full recommendation per domain
+        ol.appendChild(li);
       });
+
+      recsEl.appendChild(ol);
     }
 
-    // Helper to create a show-more toggle and manage collapsing
     function makeShowMore(quotesContainer, allQuotes) {
       const MAX_VISIBLE = 6;
       if (!allQuotes || allQuotes.length <= MAX_VISIBLE) {
         quotesContainer.dataset.collapsed = "false";
         allQuotes.forEach(q => {
-          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          const qdiv = document.createElement('div');
+          qdiv.className = "quote-line";
           qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
           quotesContainer.appendChild(qdiv);
         });
@@ -437,7 +559,8 @@
       quotesContainer.dataset.collapsed = "true";
       const visible = allQuotes.slice(0, MAX_VISIBLE);
       visible.forEach(q => {
-        const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+        const qdiv = document.createElement('div');
+        qdiv.className = "quote-line";
         qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
         quotesContainer.appendChild(qdiv);
       });
@@ -445,7 +568,8 @@
       hiddenContainer.style.display = 'none';
       hiddenContainer.className = 'hidden-quotes';
       allQuotes.slice(MAX_VISIBLE).forEach(q => {
-        const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+        const qdiv = document.createElement('div');
+        qdiv.className = "quote-line";
         qdiv.textContent = '“' + String(q).replace(/^["“]+|["”]+$/g,'') + '”';
         hiddenContainer.appendChild(qdiv);
       });
@@ -453,7 +577,7 @@
       const btn = document.createElement('button');
       btn.className = 'show-more';
       btn.textContent = `Show ${allQuotes.length - MAX_VISIBLE} more`;
-      btn.addEventListener('click', (ev) => {
+      btn.addEventListener('click', () => {
         const collapsed = quotesContainer.dataset.collapsed === "true";
         if (collapsed) {
           hiddenContainer.style.display = '';
@@ -472,7 +596,9 @@
       domainsEl.innerHTML = "";
       const domain_objects = rows.domain_objects || {};
       for (const title of DOMAIN_ORDER) {
-        const obj = domain_objects[title] || (rows['domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_')] || {});
+        const key = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        const obj = domain_objects[title] || rows[key] || {};
+
         const card = document.createElement('div'); card.className = "domain-card";
         const h = document.createElement('div'); h.className = "domain-title";
         const left = document.createElement('div'); left.textContent = title;
@@ -483,7 +609,6 @@
         const right = badge(level);
         h.appendChild(left); h.appendChild(right); card.appendChild(h);
 
-        // VALUE LINE
         const valLine = document.createElement('div');
         valLine.style.fontWeight = '600';
         valLine.style.marginBottom = '6px';
@@ -491,10 +616,14 @@
         valLine.textContent = shownText || "—";
         card.appendChild(valLine);
 
-        // QUOTES
-        let quotesList = Array.isArray(obj.unique_quotes) ? obj.unique_quotes : (obj.unique_quotes ? [obj.unique_quotes] : []);
+        let quotesList = Array.isArray(obj.unique_quotes)
+          ? obj.unique_quotes
+          : (obj.unique_quotes ? [obj.unique_quotes] : []);
         if (!quotesList.length && obj.all_quotes_text) {
-          quotesList = String(obj.all_quotes_text || "").split(/(?<=\.)\s+/).map(s => s.trim()).filter(Boolean);
+          quotesList = String(obj.all_quotes_text || "")
+            .split(/(?<=\.)\s+/)
+            .map(s => s.trim())
+            .filter(Boolean);
         }
 
         const quotesContainer = document.createElement('div');
@@ -502,19 +631,23 @@
         if (quotesList.length) {
           makeShowMore(quotesContainer, quotesList);
         } else if (obj.quote) {
-          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          const qdiv = document.createElement('div');
+          qdiv.className = "quote-line";
           qdiv.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
           quotesContainer.appendChild(qdiv);
         } else {
-          const qdiv = document.createElement('div'); qdiv.className = "quote-line";
+          const qdiv = document.createElement('div');
+          qdiv.className = "quote-line";
           qdiv.style.opacity = 0.8;
           qdiv.textContent = "—";
           quotesContainer.appendChild(qdiv);
         }
         card.appendChild(quotesContainer);
 
-        // META
-        const meta = document.createElement('div'); meta.style.marginTop = '8px'; meta.style.color = 'var(--muted)'; meta.style.fontSize = '13px';
+        const meta = document.createElement('div');
+        meta.style.marginTop = '8px';
+        meta.style.color = 'var(--muted)';
+        meta.style.fontSize = '13px';
         const quoteCount = Number(obj.quote_count || (quotesList.length)) || 0;
         meta.textContent = `Quotes: ${quoteCount}`;
         card.appendChild(meta);
@@ -557,15 +690,20 @@
         document.getElementById("ref-source").textContent = h.referral_source || "—";
         if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
 
-        summaryEl.textContent = rows_cache?.summary_overview?.value || rows_cache?.summary_overview || "—";
-        const pq = (rows_cache?.parent_quote && (rows_cache.parent_quote.quote || rows_cache.parent_quote.value)) || rows_cache.parent_quote || "";
+        summaryEl.textContent =
+          rows_cache?.summary_overview?.value ||
+          rows_cache?.summary_overview ||
+          "—";
+          let pq = "";
+        if (rows_cache && rows_cache.parent_quote) {
+          pq = rows_cache.parent_quote.quote || rows_cache.parent_quote.value || "";
+        }
         quoteEl.textContent = pq ? ('Parent Quote: “' + pq + '”') : "";
 
-        renderRecommendations(rows_cache);
+        renderRecommendations(rows_cache, currentMode);
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
 
-        // Chart
         const domain_scores = rows_cache.domain_scores || {};
         renderBurdenChart(domain_scores, currentMode);
 
@@ -612,7 +750,6 @@
           return;
         }
 
-        // reuse same rendering pipeline
         rows_cache = data.rows || {};
         const h = data.header || {};
         document.getElementById("child-name").textContent = h.child_name || "—";
@@ -623,15 +760,20 @@
         document.getElementById("ref-source").textContent = h.referral_source || "—";
         if (h.report_title) document.getElementById("report-title").textContent = h.report_title;
 
-        summaryEl.textContent = rows_cache?.summary_overview?.value || rows_cache?.summary_overview || "—";
-        const pq = (rows_cache?.parent_quote && (rows_cache.parent_quote.quote || rows_cache.parent_quote.value)) || rows_cache.parent_quote || "";
+        summaryEl.textContent =
+          rows_cache?.summary_overview?.value ||
+          rows_cache?.summary_overview ||
+          "—";
+          let pq = "";
+        if (rows_cache && rows_cache.parent_quote) {
+          pq = rows_cache.parent_quote.quote || rows_cache.parent_quote.value || "";
+        }
         quoteEl.textContent = pq ? ('Parent Quote: “' + pq + '”') : "";
 
-        renderRecommendations(rows_cache);
+        renderRecommendations(rows_cache, currentMode);
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
 
-        // Chart
         const domain_scores = rows_cache.domain_scores || {};
         renderBurdenChart(domain_scores, currentMode);
 
@@ -650,16 +792,19 @@
       if (rows_cache) {
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
+        renderRecommendations(rows_cache, currentMode);
         const domain_scores = rows_cache.domain_scores || {};
         renderBurdenChart(domain_scores, currentMode);
       }
     });
+
     modeQuotesBtn.addEventListener('click', () => {
       currentMode = "quotes";
       modeQuotesBtn.classList.add('active'); modeFreqBtn.classList.remove('active');
       if (rows_cache) {
         renderTrafficLights(rows_cache, currentMode);
         renderDomains(rows_cache, currentMode);
+        renderRecommendations(rows_cache, currentMode);
         const domain_scores = rows_cache.domain_scores || {};
         renderBurdenChart(domain_scores, currentMode);
       }
@@ -668,14 +813,13 @@
     regenBtn.addEventListener('click', regenerate);
     printBtn.addEventListener('click', () => {
       beforePrintHandler();
-      setTimeout(() => window.print(), 150);
+      setTimeout(() => window.print(), 300);
     });
     saveBtn.addEventListener('click', () => {
       beforePrintHandler();
-      setTimeout(() => window.print(), 150);
+      setTimeout(() => window.print(), 300);
     });
 
-    // Upload handlers
     uploadBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (ev) => {
       const f = ev.target.files && ev.target.files[0];

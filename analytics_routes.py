@@ -10,6 +10,9 @@ Analytics routes - updated:
 - Cleans up uploaded temporary files after processing (best-effort).
 - Includes deduplicated unique quotes and concatenated all_quotes_text per domain.
 - Stricter dedupe (threshold 0.90) and caps returned unique quotes to 12 per domain.
+- NEW: Looks up recommendations for each domain based on
+  Parent-Friendly Domain + Concern Level from recommendations Excel/CSV
+  and injects them into rows["recommendations"] for the UI.
 """
 import csv
 import json
@@ -27,6 +30,42 @@ analytics_bp = Blueprint("analytics", __name__, template_folder="templates")
 
 DATA_ROOT = Path("data")
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
+
+# -------------------------------------------------------------------
+# NEW: Recommendations lookup configuration and helpers
+# -------------------------------------------------------------------
+RECOMMENDATIONS_ROOT = Path("recommendations")
+RECOMMENDATIONS_ROOT.mkdir(parents=True, exist_ok=True)
+
+_RECS_CACHE: Dict[Tuple[str, str], str] = {}
+_RECS_CACHE_LOADED: bool = False
+
+
+def _norm_domain_for_lookup(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _norm_concern_for_lookup(label: str) -> str:
+    """
+    Normalise concern labels from the Excel (e.g. 'High concern', 'Some concern', 'No concern')
+    into internal codes: 'hi' | 'some' | 'no'
+    """
+    s = (label or "").strip().lower()
+    if "high" in s:
+        return "hi"
+    if "some" in s or "medium" in s:
+        return "some"
+    if "no" in s or "low" in s or "none" in s:
+        return "no"
+    # already short codes?
+    if s in ("hi", "high"):
+        return "hi"
+    if s in ("some", "medium"):
+        return "some"
+    if s in ("no", "low", "none"):
+        return "no"
+    return s
+
 
 # canonical keys (keep domain_* keys aligned with DOMAIN_CANON below)
 CANONICAL_KEYS = [
@@ -96,6 +135,7 @@ DOMAIN_KEYWORDS = {
 
 # ---------------------- helpers ----------------------
 
+
 def _flatten_cell_value(v) -> str:
     if v is None:
         return ""
@@ -103,10 +143,13 @@ def _flatten_cell_value(v) -> str:
         return str(v)
     return str(v).strip()
 
+
 def _empty_row() -> Dict[str, Any]:
     return {"value": None, "quote": None, "confidence": 0.0}
 
+
 # ----------------------- File discovery and readers -----------------------
+
 
 def _find_filled_file_for_session(session_id: str) -> Optional[Path]:
     session_dir = DATA_ROOT / session_id
@@ -131,6 +174,7 @@ def _find_filled_file_for_session(session_id: str) -> Optional[Path]:
                 return c
     return candidates[0]
 
+
 def _read_csv_filled(path: Path) -> List[Dict[str, Any]]:
     text = path.read_text(encoding="utf-8", errors="replace")
     sample = text[:8192]
@@ -152,9 +196,10 @@ def _read_csv_filled(path: Path) -> List[Dict[str, Any]]:
     with path.open(newline="", encoding="utf-8", errors="replace") as fh:
         reader = _csv.DictReader(fh, delimiter=delimiter)
         for r in reader:
-            low = { (k or "").strip().lower(): (v if v is not None else "") for k, v in r.items() }
+            low = {(k or "").strip().lower(): (v if v is not None else "") for k, v in r.items()}
             rows.append(low)
     return rows
+
 
 def _read_json_filled(path: Path) -> List[Dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -178,6 +223,7 @@ def _read_json_filled(path: Path) -> List[Dict[str, Any]]:
         return data
     return []
 
+
 def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
     try:
         import openpyxl
@@ -188,7 +234,7 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
     ws = wb.active
     rows = []
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
-    headers = [ (str(h).strip().lower() if h is not None else "") for h in header_row ]
+    headers = [(str(h).strip().lower() if h is not None else "") for h in header_row]
     for row in ws.iter_rows(min_row=2, values_only=True):
         rec = {}
         for i, h in enumerate(headers):
@@ -198,23 +244,90 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
         rows.append(rec)
     return rows
 
+
 # ----------------------- Mapping helpers -----------------------
+def _canonical_row_key_from_label(label: str) -> Optional[str]:
+    """
+    Map human-readable question text from the Excel to canonical keys
+    we can later use for the header + summary.
+    """
+    if not label:
+        return None
+
+    s = str(label).strip().lower()
+    s = s.replace("’", "'")  # normalise apostrophes
+
+    # Basic header fields
+    if "what is your child's full name" in s or "what is your childs full name" in s:
+        return "child_name"
+
+    if "how old is your child" in s:
+        return "child_age"
+
+    if "what is your full name" in s:
+        # parent respondent name
+        return "parent_respondent"
+
+    if "who is conducting today's interview" in s or "who is conducting today" in s:
+        return "interviewer"
+
+    if "how were you referred to our service" in s or "how were you referred to the service" in s:
+        return "referral_source"
+
+    # Domains we want for summary
+    if "what are your main concerns about your child" in s or "main concerns about your child" in s:
+        return "domain_parents_goal"
+
+    if "what positive activities describe your child" in s or "positive activities describe your child" in s:
+        return "domain_strengths_interests"
+
+    if "has your child undergone any previous assessments" in s or "previous assessments" in s:
+        return "domain_care_history"
+
+    return None
 
 def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
+
         def get_any(*names):
             for n in names:
                 if n in r and r[n] not in (None, ""):
                     return r[n]
             return None
+
         row_key = get_any("row_key", "key", "row", "rowlabel", "row_label", "row label")
-        row_label = get_any("row_label", "label", "rowlabel", "row label", "possible parent-friendly question", "question")
-        value = get_any("value", "answer", "filled_value", "response", "result", "frequency", "frequency_code", "frequency code", "response_code")
+        row_label = get_any(
+            "row_label",
+            "label",
+            "rowlabel",
+            "row label",
+            "possible parent-friendly question",
+            "question",
+        )
+        value = get_any(
+            "value",
+            "answer",
+            "filled_value",
+            "response",
+            "result",
+            "frequency",
+            "frequency_code",
+            "frequency code",
+            "response_code",
+        )
         quote = get_any("quote", "evidence", "supporting_quote", "support", "found_quote")
         conf = get_any("confidence", "conf", "score", "certainty")
+
+        # 🔹 NEW: infer canonical row_key from the human-readable question text
+        if row_label:
+            canon = _canonical_row_key_from_label(str(row_label))
+            if canon:
+                row_key = canon
+
         if not row_key and row_label:
             row_key = str(row_label).strip().lower().replace(" ", "_")
+
         if isinstance(conf, str):
             try:
                 conf_num = float(conf.strip())
@@ -224,7 +337,12 @@ def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
             conf_num = float(conf)
         else:
             conf_num = 0.0
-        key = str(row_key) if row_key else (str(row_label).strip().lower().replace(" ", "_") if row_label else None)
+
+        key = (
+            str(row_key)
+            if row_key
+            else (str(row_label).strip().lower().replace(" ", "_") if row_label else None)
+        )
         if not key:
             for kk, vv in r.items():
                 if vv not in (None, ""):
@@ -232,12 +350,15 @@ def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
                     break
         if not key:
             continue
+
         val_s = None if value is None or (isinstance(value, str) and value.strip() == "") else value
         quote_s = None if quote is None or (isinstance(quote, str) and quote.strip() == "") else quote
         out[key] = {"value": val_s, "quote": quote_s, "confidence": conf_num}
     return out
 
+
 # ----------------------- Frequency normalization and scoring -----------------------
+
 
 def _normalize_freq_token(v: Optional[str]) -> Optional[str]:
     if v is None:
@@ -268,6 +389,7 @@ def _normalize_freq_token(v: Optional[str]) -> Optional[str]:
             return "never"
     return None
 
+
 def _token_weight(tok: Optional[str]) -> int:
     if tok == "always":
         return 2
@@ -275,7 +397,9 @@ def _token_weight(tok: Optional[str]) -> int:
         return 1
     return 0
 
+
 # ----------------------- Domain helpers -----------------------
+
 
 def _domain_label_from_row_key_or_text(text: str) -> str:
     s = _flatten_cell_value(text).lower()
@@ -287,6 +411,7 @@ def _domain_label_from_row_key_or_text(text: str) -> str:
         if any(tok in canon.lower() for tok in s.split()):
             return canon
     return text.strip().title() if text else "Unknown"
+
 
 def _find_domain_rows_in_raw_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     domain_candidates: Dict[str, List[Dict[str, Any]]] = {d: [] for d in DOMAIN_CANON}
@@ -309,14 +434,18 @@ def _find_domain_rows_in_raw_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, 
                         break
     return domain_candidates
 
+
 # ----------------------- Core loader -----------------------
 
-def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, Any]], Optional[Path], List[Dict[str, Any]]]:
+
+def load_filled_rows_for_session(
+    session_id: str,
+) -> Tuple[Dict[str, Dict[str, Any]], Optional[Path], List[Dict[str, Any]]]:
     p = _find_filled_file_for_session(session_id)
     if not p:
         return {}, None, []
     current_app.logger.info("Analytics: reading filled file: %s", p)
-    rows_list = []
+    rows_list: List[Dict[str, Any]] = []
     try:
         if p.suffix.lower() in (".csv", ".txt", ".tsv"):
             rows_list = _read_csv_filled(p)
@@ -334,20 +463,25 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
     normalized: Dict[str, Dict[str, Any]] = {}
     for k in CANONICAL_KEYS:
         if k in mapped:
-            normalized[k] = mapped[k]; continue
+            normalized[k] = mapped[k]
+            continue
         found = None
         for mk in mapped.keys():
             if k in mk:
-                found = mk; break
+                found = mk
+                break
         if found:
-            normalized[k] = mapped[found]; continue
+            normalized[k] = mapped[found]
+            continue
         words = k.replace("_", " ").split()
         best = None
         for mk in mapped.keys():
             if all(w.lower() in mk.lower() for w in words[:2]):
-                best = mk; break
+                best = mk
+                break
         if best:
-            normalized[k] = mapped[best]; continue
+            normalized[k] = mapped[best]
+            continue
         normalized[k] = _empty_row()
 
     # domain matching and population of canonical domain_* keys
@@ -372,7 +506,6 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
         "domain_strengths_interests": "Strengths / Interests",
     }
 
-
     # helper pick best candidate (prefers explicit freq/quote)
     def _pick_best_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not cands:
@@ -381,7 +514,16 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
         best_score = -1
         for r in cands:
             score = 0
-            for fk in ("frequency_code", "frequency code", "frequency", "freq", "response_code", "response code", "value", "answer"):
+            for fk in (
+                "frequency_code",
+                "frequency code",
+                "frequency",
+                "freq",
+                "response_code",
+                "response code",
+                "value",
+                "answer",
+            ):
                 v = r.get(fk) if fk in r else None
                 if v not in (None, "", []):
                     score += 5
@@ -408,45 +550,60 @@ def load_filled_rows_for_session(session_id: str) -> Tuple[Dict[str, Dict[str, A
         if chosen:
             val = None
             quote = None
-            for fk in ("frequency_code", "frequency code", "frequency", "freq", "response_code", "response code", "value", "answer"):
+            for fk in (
+                "frequency_code",
+                "frequency code",
+                "frequency",
+                "freq",
+                "response_code",
+                "response code",
+                "value",
+                "answer",
+            ):
                 if fk in chosen and chosen[fk] not in (None, ""):
-                    val = chosen[fk]; break
+                    val = chosen[fk]
+                    break
             for qk in ("quote", "evidence", "support", "found_quote", "supporting_quote"):
                 if qk in chosen and chosen[qk] not in (None, ""):
-                    quote = chosen[qk]; break
+                    quote = chosen[qk]
+                    break
             if val is None:
                 for hk in ("row_label", "label", "question", "possible parent-friendly question"):
                     if hk in chosen and chosen[hk] not in (None, ""):
-                        val = chosen[hk]; break
+                        val = chosen[hk]
+                        break
             if quote is None:
                 long_text = None
                 for v in chosen.values():
                     if v and isinstance(v, str) and len(v) > 30 and len(v) < 1000:
-                        long_text = v; break
+                        long_text = v
+                        break
                 if long_text:
                     quote = long_text
             normalized[dk] = {
                 "value": val if val not in (None, "") else None,
                 "quote": quote if quote not in (None, "") else None,
-                "confidence": 1.0 if val or quote else 0.0
+                "confidence": 1.0 if val or quote else 0.0,
             }
 
     return normalized, p, rows_list
 
+
 # ----------------------- Unique-quote dedupe -----------------------
+
 
 def _normalize_quote_text(q: str) -> str:
     s = q or ""
     s = s.strip()
     s = re.sub(r"\s+", " ", s)
-    s = re.sub(r'[“”"\'\u2018\u2019]', '', s)
+    s = re.sub(r'[“”"\'\u2018\u2019]', "", s)
     s = s.lower().strip()
     return s
 
+
 def _dedupe_quotes(quotes: List[str], threshold: float = 0.90) -> List[str]:
-    """Dedupe by similarity >= threshold using difflib.SequenceMatcher.
-    Higher threshold (0.90) to collapse near-duplicates more aggressively."""
-    unique = []
+    """Dedupe by similarity >= threshold using difflib.SequenceMatcher."""
+    unique: List[str] = []
     for q in quotes:
         nq = _normalize_quote_text(q)
         if not nq:
@@ -461,11 +618,15 @@ def _dedupe_quotes(quotes: List[str], threshold: float = 0.90) -> List[str]:
             unique.append(q)
     return unique
 
+
 # ----------------------- Aggregation / scoring -----------------------
+
 
 def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     # Initialize
-    domain_buckets = {d: {"always": 0, "some": 0, "never": 0, "unknown": 0, "quotes": []} for d in DOMAIN_CANON}
+    domain_buckets = {
+        d: {"always": 0, "some": 0, "never": 0, "unknown": 0, "quotes": []} for d in DOMAIN_CANON
+    }
 
     domain_candidates = _find_domain_rows_in_raw_rows(rows_list)
 
@@ -500,7 +661,16 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             continue
 
         freq_raw = None
-        for fk in ("frequency_code", "frequency code", "frequency", "freq", "response_code", "response code", "value", "answer"):
+        for fk in (
+            "frequency_code",
+            "frequency code",
+            "frequency",
+            "freq",
+            "response_code",
+            "response code",
+            "value",
+            "answer",
+        ):
             if fk in r and r[fk] not in (None, ""):
                 freq_raw = r[fk]
                 break
@@ -536,31 +706,36 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             percent = 0.0
         percent = round(percent, 1)
 
-        # dedupe quotes and count
         quotes = counts.get("quotes", []) or []
         unique_quotes = _dedupe_quotes(quotes)
-        # cap quotes returned per domain to avoid huge payloads (server-side cap)
         MAX_QUOTES_PER_DOMAIN = 12
         if len(unique_quotes) > MAX_QUOTES_PER_DOMAIN:
             truncated = unique_quotes[:MAX_QUOTES_PER_DOMAIN]
         else:
             truncated = unique_quotes
-        qcount = len(unique_quotes)  # real count of deduped quotes
+        qcount = len(unique_quotes)
         results[domain] = {
-            "counts": {"always": a, "some": s, "never": n, "unknown": counts.get("unknown", 0)},
+            "counts": {
+                "always": a,
+                "some": s,
+                "never": n,
+                "unknown": counts.get("unknown", 0),
+            },
             "weighted_sum": weighted_sum,
             "total_count": total,
-            "percent": percent,    # frequency percent (0-100), rounded
-            "unique_quotes": truncated,  # truncated list (up to MAX_QUOTES_PER_DOMAIN)
+            "percent": percent,
+            "unique_quotes": truncated,
             "quote_count": qcount,
-            "quote_total_text": " ".join(unique_quotes)  # full deduped text
+            "quote_total_text": " ".join(unique_quotes),
         }
         weighted_totals_sum += weighted_sum
 
-    # compute share for frequency (normalize weighted_sum across domains) and for quotes (normalize quote_count)
+    # compute share for frequency
     if weighted_totals_sum > 0:
         for domain, info in results.items():
-            info["freq_share"] = round((float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0, 1)
+            info["freq_share"] = round(
+                (float(info["weighted_sum"]) / float(weighted_totals_sum)) * 100.0, 1
+            )
     else:
         for domain in results:
             results[domain]["freq_share"] = 0.0
@@ -569,12 +744,15 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
     total_quote_count = sum(info["quote_count"] for info in results.values())
     if total_quote_count > 0:
         for domain, info in results.items():
-            info["quote_share"] = round((float(info["quote_count"]) / float(total_quote_count)) * 100.0, 1)
+            info["quote_share"] = round(
+                (float(info["quote_count"]) / float(total_quote_count)) * 100.0, 1
+            )
     else:
         for domain in results:
             results[domain]["quote_share"] = 0.0
 
     return results
+
 
 def _percent_to_level(percent: float) -> str:
     if percent is None:
@@ -585,18 +763,187 @@ def _percent_to_level(percent: float) -> str:
         return "no"
     if p > 70:
         return "hi"
-    if p >= 40:
+    if p >= 30:
         return "some"
     if p < 30:
         return "no"
-    return "some"
+    return "no"
+
+
+# ----------------------- Recommendations loader -----------------------
+
+
+def _load_recommendations_table() -> Dict[Tuple[str, str], str]:
+    """
+    Load mapping: (Parent-Friendly Domain, Concern Level) -> Recommendations text.
+    Uses the first XLSX/CSV it finds in DATA_ROOT/recommendations.
+    """
+    global _RECS_CACHE_LOADED, _RECS_CACHE
+    if _RECS_CACHE_LOADED:
+        return _RECS_CACHE
+
+    _RECS_CACHE_LOADED = True
+    _RECS_CACHE = {}
+
+    try:
+        if not RECOMMENDATIONS_ROOT.exists():
+            current_app.logger.warning("Recommendations root %s does not exist", RECOMMENDATIONS_ROOT)
+            return _RECS_CACHE
+
+        candidates: List[Path] = []
+        for p in RECOMMENDATIONS_ROOT.iterdir():
+            if p.suffix.lower() in (".xlsx", ".xls", ".csv", ".tsv", ".txt"):
+                candidates.append(p)
+
+        if not candidates:
+            current_app.logger.warning("No recommendations file found under %s", RECOMMENDATIONS_ROOT)
+            return _RECS_CACHE
+
+        # Prefer xlsx
+        order = {".xlsx": 0, ".xls": 1, ".csv": 2, ".tsv": 3, ".txt": 4}
+        candidates.sort(key=lambda p: order.get(p.suffix.lower(), 99))
+        path = candidates[0]
+        current_app.logger.info("Using recommendations file: %s", path)
+
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            try:
+                import openpyxl
+            except Exception as e:
+                current_app.logger.error("openpyxl required for recommendations: %s", e)
+                return _RECS_CACHE
+
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = wb.active
+            header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+            header_map = {
+                (str(h).strip().lower() if h is not None else ""): idx
+                for idx, h in enumerate(header_row)
+            }
+
+            def find_col(*cands):
+                for key, idx in header_map.items():
+                    for cand in cands:
+                        if cand in key:
+                            return idx
+                return None
+
+            dom_idx = find_col("parent-friendly domain", "parent friendly", "domain")
+            level_idx = find_col("concern level", "concern")
+            rec_idx = find_col(
+                "recommendations, supports, and resources",
+                "recommendations",
+                "resources",
+                "supports",
+            )
+
+            if dom_idx is None or level_idx is None or rec_idx is None:
+                current_app.logger.warning(
+                    "Recommendations file missing expected columns (domain/concern/recommendations)"
+                )
+                return _RECS_CACHE
+
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                dom = row[dom_idx] if dom_idx < len(row) else None
+                lvl = row[level_idx] if level_idx < len(row) else None
+                rec = row[rec_idx] if rec_idx < len(row) else None
+                if not dom or not lvl or not rec:
+                    continue
+                dom_key = _norm_domain_for_lookup(str(dom))
+                lvl_key = _norm_concern_for_lookup(str(lvl))
+                text = str(rec).strip()
+                if not text:
+                    continue
+                _RECS_CACHE[(dom_key, lvl_key)] = text
+
+        else:
+            # CSV / TSV
+            import csv as _csv
+
+            text = path.read_text(encoding="utf-8", errors="replace")
+            sample = text[:8192]
+            delimiter = ","
+            if "\t" in sample and sample.count("\t") > sample.count(","):
+                delimiter = "\t"
+
+            with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+                reader = _csv.DictReader(fh, delimiter=delimiter)
+                for r in reader:
+                    dom = (
+                        r.get("Parent-Friendly Domain")
+                        or r.get("parent-friendly domain")
+                        or r.get("Domain")
+                        or r.get("domain")
+                    )
+                    lvl = (
+                        r.get("Concern Level")
+                        or r.get("concern level")
+                        or r.get("Concern")
+                        or r.get("concern")
+                    )
+                    rec = (
+                        r.get("Recommendations, Supports, and Resources (Ireland – Cork/Kerry)")
+                        or r.get("recommendations")
+                        or r.get("Recommendations")
+                    )
+                    if not dom or not lvl or not rec:
+                        continue
+                    dom_key = _norm_domain_for_lookup(str(dom))
+                    lvl_key = _norm_concern_for_lookup(str(lvl))
+                    _RECS_CACHE[(dom_key, lvl_key)] = str(rec).strip()
+
+    except Exception as e:
+        current_app.logger.exception("Failed to load recommendations table: %s", e)
+
+    return _RECS_CACHE
+
+
+def _build_recommendations_from_domains(
+    domain_objects: Dict[str, Dict[str, Any]],
+    mode: str = "frequency",
+) -> List[str]:
+    """
+    Build recommendations using either:
+      - mode="frequency": freq_percent
+      - mode="quotes":    quote_share
+
+    For each domain we map its concern level (hi/some/no) to the
+    (Parent-Friendly Domain, Concern Level) row in the recommendations table.
+    """
+    table = _load_recommendations_table()
+    if not table:
+        return []
+
+    lines: List[str] = []
+    for domain_name, dobj in domain_objects.items():
+        # Choose which metric to use for concern level
+        if mode == "quotes":
+            metric = dobj.get("quote_share", 0.0)
+        else:  # default: frequency
+            metric = dobj.get("freq_percent", 0.0)
+
+        lvl_code = _percent_to_level(metric)  # "hi" | "some" | "no"
+
+        # OPTIONAL: skip "no concern" if you only want hi/some
+        # if lvl_code == "no":
+        #     continue
+
+        dom_key = _norm_domain_for_lookup(domain_name)
+        rec_text = table.get((dom_key, lvl_code))
+        if not rec_text:
+            continue
+
+        lines.append(f"{domain_name}: {rec_text}")
+
+    return lines
+
 
 # ----------------------- Header extraction -----------------------
+
 
 def _extract_header_from_transcript(session_id: str) -> Dict[str, str]:
     base = DATA_ROOT / session_id
     transcript_path = base / "transcript.txt"
-    out = {}
+    out: Dict[str, str] = {}
     if not transcript_path.exists():
         return out
     txt = transcript_path.read_text(encoding="utf-8", errors="replace")
@@ -620,6 +967,7 @@ def _extract_header_from_transcript(session_id: str) -> Dict[str, str]:
             out["date_of_interview"] = m.group(1).strip()
     return out
 
+
 def load_header_metadata(session_id: str) -> Dict[str, str]:
     meta_path = DATA_ROOT / session_id / "report_meta.json"
     header = {
@@ -637,7 +985,9 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
             header.update({k: v for k, v in data.items() if v is not None})
             return header
         except Exception:
-            current_app.logger.warning("Failed to parse report_meta.json; falling back to transcript.")
+            current_app.logger.warning(
+                "Failed to parse report_meta.json; falling back to transcript."
+            )
     extracted = _extract_header_from_transcript(session_id)
     if extracted:
         header.update({k: v for k, v in extracted.items() if v})
@@ -651,33 +1001,118 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
             pass
     return header
 
-# ----------------------- Shared processing helper -----------------------
 
-def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_list: List[Dict[str, Any]], header_meta: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+# ----------------------- Shared processing helper -----------------------
+def _extract_basic_info_from_rows_list(rows_list: List[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Scan the raw Excel rows for the basic Q&A items and pull their answers:
+
+      - What is your child's full name?        -> child_name
+      - How old is your child?                -> child_age
+      - What is your full name?               -> parent_respondent
+      - Who is conducting today's interview?  -> interviewer
+      - How were you referred to our service? -> referral_source
+    """
+    info = {
+        "child_name": None,
+        "child_age": None,
+        "parent_respondent": None,
+        "interviewer": None,
+        "referral_source": None,
+    }
+
+    def get_any(r: Dict[str, Any], *names):
+        for n in names:
+            if n in r and r[n] not in (None, ""):
+                return r[n]
+        return None
+
+    for r in rows_list:
+        label = get_any(
+            r,
+            "row_label",
+            "label",
+            "row label",
+            "rowlabel",
+            "possible parent-friendly question",
+            "question",
+        )
+        answer = get_any(
+            r,
+            "answer",
+            "value",
+            "filled_value",
+            "response",
+            "result",
+        )
+        if not label or answer in (None, ""):
+            continue
+
+        s = str(label).strip().lower().replace("’", "'")
+
+        if "what is your child's full name" in s or "what is your childs full name" in s:
+            if not info["child_name"]:
+                info["child_name"] = str(answer).strip()
+        elif "how old is your child" in s:
+            if not info["child_age"]:
+                info["child_age"] = str(answer).strip()
+        elif "what is your full name" in s:
+            if not info["parent_respondent"]:
+                info["parent_respondent"] = str(answer).strip()
+        elif "who is conducting today's interview" in s or "who is conducting today" in s:
+            if not info["interviewer"]:
+                info["interviewer"] = str(answer).strip()
+        elif "how were you referred to our service" in s or "referred to our service" in s:
+            if not info["referral_source"]:
+                info["referral_source"] = str(answer).strip()
+
+    return info
+
+def _process_rows_into_response(
+    mapped_rows: Dict[str, Dict[str, Any]],
+    rows_list: List[Dict[str, Any]],
+    header_meta: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """
     Build the identical 'rows_out' and 'domain_scores' payload that api_generate returns,
     given already-mapped canonical rows (mapped_rows) and the raw rows_list.
+
+    NEW:
+    - Enrich header from Excel rows where possible (child_name, parent, etc.).
+    - Auto-generate a natural-language summary_overview string using:
+        * header fields (child, age, parent, interviewer, date, referral source)
+        * Parent's Goal for this Assessment domain
+        * Strengths / Interests domain
     """
-    # normalized: use mapped canonical or empty row
+    # ---------------- Normalise canonical rows ----------------
     normalized: Dict[str, Dict[str, Any]] = {}
     for k in CANONICAL_KEYS:
         if k in mapped_rows:
-            normalized[k] = mapped_rows[k]; continue
+            normalized[k] = mapped_rows[k]
+            continue
+
         found = None
         for mk in mapped_rows.keys():
             if k in mk:
-                found = mk; break
+                found = mk
+                break
         if found:
-            normalized[k] = mapped[found]; continue
+            normalized[k] = mapped_rows[found]
+            continue
+
         words = k.replace("_", " ").split()
         best = None
         for mk in mapped_rows.keys():
             if all(w.lower() in mk.lower() for w in words[:2]):
-                best = mk; break
+                best = mk
+                break
         if best:
-            normalized[k] = mapped_rows[best]; continue
+            normalized[k] = mapped_rows[best]
+            continue
+
         normalized[k] = _empty_row()
 
+    # ---------------- Aggregate domain metrics ----------------
     agg = _aggregate_domain_weights_from_rows(rows_list)
 
     # Build canonical domain objects with both frequency (percent) and quote metrics
@@ -686,6 +1121,8 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
         info = agg.get(domain, {})
         rep_val = None
         rep_quote = None
+
+        # Find any canonical domain_* row that matches this domain
         for k, v in normalized.items():
             if not k.startswith("domain_"):
                 continue
@@ -693,6 +1130,8 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
                 rep = v or {}
                 rep_val = rep.get("value") or rep_val
                 rep_quote = rep.get("quote") or rep_quote
+
+        # If no explicit quote but we have quotes in agg, use the first one
         if not rep_quote and info.get("unique_quotes"):
             rep_quote = info["unique_quotes"][0] if len(info["unique_quotes"]) > 0 else None
 
@@ -704,18 +1143,20 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
             "freq_share": info.get("freq_share", 0.0),
             "quote_count": info.get("quote_count", 0),
             "quote_share": info.get("quote_share", 0.0),
-            "unique_quotes": info.get("unique_quotes", []) if isinstance(info.get("unique_quotes", []), list) else [],
-            "all_quotes_text": info.get("quote_total_text", "")
+            "unique_quotes": info.get("unique_quotes", [])
+            if isinstance(info.get("unique_quotes", []), list)
+            else [],
+            "all_quotes_text": info.get("quote_total_text", ""),
         }
 
-    # Derive traffic lists for frequency and for quotes
-    traffic_freq_hi = []
-    traffic_freq_some = []
-    traffic_freq_no = []
+    # ---------------- Traffic lists (frequency + quotes) ----------------
+    traffic_freq_hi: List[str] = []
+    traffic_freq_some: List[str] = []
+    traffic_freq_no: List[str] = []
 
-    traffic_quote_hi = []
-    traffic_quote_some = []
-    traffic_quote_no = []
+    traffic_quote_hi: List[str] = []
+    traffic_quote_some: List[str] = []
+    traffic_quote_no: List[str] = []
 
     for domain, dobj in domain_objects.items():
         p = dobj.get("freq_percent", 0.0)
@@ -736,13 +1177,12 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
         else:
             traffic_quote_no.append(domain)
 
-    # Build rows_out canonical map (keep original rows for non-domain keys)
-    rows_out = {}
-    # copy existing canonical keys
+    # ---------------- Base rows_out map ----------------
+    rows_out: Dict[str, Any] = {}
     for k in CANONICAL_KEYS:
         rows_out[k] = normalized.get(k, _empty_row())
 
-    # Insert domain_* canonical objects (include full unique_quotes and all_quotes_text)
+    # Insert detailed domain_* objects (with shares and quotes) for key domains
     for domain_key, domain_name in {
         "domain_attention_adhd": "Attention / ADHD",
         "domain_learning_dyslexia": "Learning / Dyslexia",
@@ -762,30 +1202,38 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
             "quote_count": dobj.get("quote_count", 0),
             "quote_share": dobj.get("quote_share", 0.0),
             "unique_quotes": dobj.get("unique_quotes", []),
-            "all_quotes_text": dobj.get("all_quotes_text", "")
+            "all_quotes_text": dobj.get("all_quotes_text", ""),
         }
 
-    # For convenience: default fields (legacy names) will be frequency-mode lists (so old UI still works)
-    def _to_wrap_list(arr):
+    # Helper to wrap traffic lists
+    def _to_wrap_list(arr: List[str]) -> Dict[str, Any]:
         if not arr:
             return {"value": None, "quote": None, "confidence": 0.0, "list": [], "text": None}
-        return {"value": ", ".join(arr), "quote": None, "confidence": 1.0, "list": arr, "text": ", ".join(arr)}
+        return {
+            "value": ", ".join(arr),
+            "quote": None,
+            "confidence": 1.0,
+            "list": arr,
+            "text": ", ".join(arr),
+        }
 
+    # Frequency traffic
     rows_out["traffic_freq_high"] = _to_wrap_list(traffic_freq_hi)
     rows_out["traffic_freq_some"] = _to_wrap_list(traffic_freq_some)
     rows_out["traffic_freq_no"] = _to_wrap_list(traffic_freq_no)
 
+    # Quote traffic
     rows_out["traffic_quote_high"] = _to_wrap_list(traffic_quote_hi)
     rows_out["traffic_quote_some"] = _to_wrap_list(traffic_quote_some)
     rows_out["traffic_quote_no"] = _to_wrap_list(traffic_quote_no)
 
-    # Legacy default
+    # Legacy aliases
     rows_out["traffic_high"] = rows_out["traffic_freq_high"]
     rows_out["traffic_some"] = rows_out["traffic_freq_some"]
     rows_out["traffic_no"] = rows_out["traffic_freq_no"]
 
-    # domain_scores maps for charting: freq_share and quote_share both provided
-    domain_scores = {}
+    # Domain scores for charting
+    domain_scores: Dict[str, Any] = {}
     for domain in DOMAIN_CANON:
         info = agg.get(domain, {})
         domain_scores[domain] = {
@@ -798,22 +1246,143 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
     rows_out["domain_objects"] = domain_objects
     rows_out["domain_scores"] = domain_scores
 
-    # Ensure recommendations exist
-    if "recommendations" not in rows_out or not rows_out["recommendations"].get("value"):
-        rows_out["recommendations"] = {"value": None, "quote": None, "confidence": 0.0}
+    # ---------------- Header: merge meta + Excel rows ----------------
+    # Start from provided header_meta or sensible defaults
+    if header_meta:
+        header = dict(header_meta)
+    else:
+        header = {
+            "child_name": "—",
+            "child_age": "—",
+            "date_of_interview": datetime.utcnow().strftime("%d %b %Y"),
+            "parent_respondent": "—",
+            "interviewer": "—",
+            "referral_source": "—",
+            "report_title": "Parent Telephone Interview Summary",
+        }
 
-    # Add header
-    header = header_meta or {
-        "child_name": "—",
-        "child_age": "—",
-        "date_of_interview": datetime.utcnow().strftime("%d %b %Y"),
-        "parent_respondent": "—",
-        "interviewer": "—",
-        "referral_source": "—",
-        "report_title": "Uploaded Data Analytics",
+    # Ensure required keys exist
+    header.setdefault("child_name", "—")
+    header.setdefault("child_age", "—")
+    header.setdefault("parent_respondent", "—")
+    header.setdefault("interviewer", "—")
+    header.setdefault("referral_source", "—")
+    header.setdefault("report_title", "Parent Telephone Interview Summary")
+    header.setdefault(
+        "date_of_interview",
+        datetime.utcnow().strftime("%d %b %Y"),
+    )
+
+    # Helper: if header field is empty/placeholder, try to fill from mapped_rows
+    def _fill_header_from_rows(header_key: str, row_key: str):
+        if header.get(header_key) not in (None, "", "—"):
+            return
+        row = mapped_rows.get(row_key)
+        if row and row.get("value") not in (None, ""):
+            header[header_key] = str(row["value"]).strip()
+
+    _fill_header_from_rows("child_name", "child_name")
+    _fill_header_from_rows("child_age", "child_age")
+    _fill_header_from_rows("parent_respondent", "parent_respondent")
+    _fill_header_from_rows("interviewer", "interviewer")
+    _fill_header_from_rows("referral_source", "referral_source")
+
+        # Extra safety: backfill header fields directly from the raw Excel Q&A rows
+    try:
+        basic = _extract_basic_info_from_rows_list(rows_list)
+        for hk, val in basic.items():
+            if val and header.get(hk) in (None, "", "—"):
+                header[hk] = val
+    except Exception as e:
+        current_app.logger.warning("Header backfill from rows_list failed: %s", e)
+
+
+    # ---------------- Build natural-language summary ----------------
+    def _get_domain_text(domain_name: str) -> str:
+        # 1. Try domain_objects (quote > value)
+        dobj = domain_objects.get(domain_name, {}) or {}
+        txt = dobj.get("quote") or dobj.get("value")
+
+        # 2. If still empty, look up canonical domain_* row in rows_out
+        if not txt:
+            domain_key_map = {
+                "Parent's Goal for this Assessment": "domain_parents_goal",
+                "Strengths / Interests": "domain_strengths_interests",
+            }
+            dk = domain_key_map.get(domain_name)
+            if dk and dk in rows_out:
+                row = rows_out[dk] or {}
+                txt = row.get("quote") or row.get("value")
+
+        return str(txt).strip() if txt else ""
+
+    child_name = header.get("child_name") or "—"
+    child_age = header.get("child_age") or "—"
+    parent_name = header.get("parent_respondent") or "—"
+    interviewer = header.get("interviewer") or "—"
+    date_int = header.get("date_of_interview") or "—"
+    referral_source = header.get("referral_source") or "—"
+
+    assessment_goals = _get_domain_text("Parent's Goal for this Assessment")
+    strengths = _get_domain_text("Strengths / Interests")
+
+    parts: List[str] = []
+    parts.append(f"Child name is {child_name}, aged {child_age}.")
+    parts.append(
+        f"The parent respondent is {parent_name}, and the interview was conducted by {interviewer} on {date_int}."
+    )
+    parts.append(f"The referral source for this assessment is {referral_source}.")
+
+    if assessment_goals:
+        parts.append(f"The parent’s main goals for the assessment are: {assessment_goals}.")
+    if strengths:
+        parts.append(f"The child’s strengths include: {strengths}.")
+
+    summary_text = " ".join(p.strip() for p in parts if p and p.strip())
+
+    rows_out["summary_overview"] = {
+        "value": summary_text if summary_text else None,
+        "quote": None,
+        "confidence": 1.0 if summary_text else 0.0,
     }
 
-    # persist derived rows for debugging (optional)
+    # ---------------- Recommendations from domain scores ----------------
+    rec_lines_freq = _build_recommendations_from_domains(
+        domain_objects, mode="frequency"
+    )
+    rec_lines_quotes = _build_recommendations_from_domains(
+        domain_objects, mode="quotes"
+    )
+
+    if rec_lines_freq:
+        rows_out["recommendations_freq"] = {
+            "value": "\n".join(rec_lines_freq),
+            "quote": None,
+            "confidence": 1.0,
+            "list": rec_lines_freq,
+        }
+
+    if rec_lines_quotes:
+        rows_out["recommendations_quotes"] = {
+            "value": "\n".join(rec_lines_quotes),
+            "quote": None,
+            "confidence": 1.0,
+            "list": rec_lines_quotes,
+        }
+
+    # default "recommendations" = frequency list, then quotes, else empty
+    if rec_lines_freq:
+        rows_out["recommendations"] = rows_out["recommendations_freq"]
+    elif rec_lines_quotes:
+        rows_out["recommendations"] = rows_out["recommendations_quotes"]
+    elif "recommendations" not in rows_out or not rows_out["recommendations"].get("value"):
+        rows_out["recommendations"] = {
+            "value": None,
+            "quote": None,
+            "confidence": 0.0,
+        }
+
+    # ---------------- Persist derived rows (optional) ----------------
     try:
         uid = str(uuid.uuid4())[:8]
         outp = DATA_ROOT / f"upload_{uid}_analytics_rows.json"
@@ -825,6 +1394,7 @@ def _process_rows_into_response(mapped_rows: Dict[str, Dict[str, Any]], rows_lis
     return {"ok": True, "header": header, "rows": rows_out}
 
 # ----------------------- Upload endpoint -----------------------
+
 
 @analytics_bp.post("/api/analytics/upload")
 def api_upload_and_generate():
@@ -842,7 +1412,7 @@ def api_upload_and_generate():
 
     filename = f.filename
     suffix = Path(filename).suffix.lower() or ".csv"
-    tmp_path = None
+    tmp_path: Optional[Path] = None
     try:
         # write to temp file to reuse existing readers
         uid = uuid.uuid4().hex
@@ -862,7 +1432,6 @@ def api_upload_and_generate():
             rows_list = _read_csv_filled(tmp_path)
     except Exception as e:
         current_app.logger.exception("Failed to save/read uploaded file: %s", e)
-        # attempt to remove tmp file if present
         try:
             if tmp_path and tmp_path.exists():
                 tmp_path.unlink()
@@ -871,7 +1440,6 @@ def api_upload_and_generate():
         return jsonify({"ok": False, "error": "Failed to save or parse uploaded file"}), 500
 
     mapped = _map_row_list_to_dict(rows_list)
-    # optional: build header from first rows or fallback
     header_meta = {
         "child_name": "—",
         "child_age": "—",
@@ -886,25 +1454,33 @@ def api_upload_and_generate():
         response_payload = _process_rows_into_response(mapped, rows_list, header_meta)
         return jsonify(response_payload)
     finally:
-        # cleanup uploaded file (best-effort)
         try:
             if tmp_path and tmp_path.exists():
                 tmp_path.unlink()
                 current_app.logger.info("Analytics: removed uploaded temp file %s", tmp_path)
         except Exception as e:
-            current_app.logger.warning("Analytics: failed to remove uploaded temp file %s: %s", tmp_path, e)
+            current_app.logger.warning(
+                "Analytics: failed to remove uploaded temp file %s: %s", tmp_path, e
+            )
+
 
 # ----------------------- API (pure-Python) -----------------------
+
 
 @analytics_bp.get("/api/analytics/<session_id>")
 def api_generate(session_id):
     rows, path_used, raw_rows_list = load_filled_rows_for_session(session_id)
     if not rows:
-        current_app.logger.error("Analytics: no filled rows found for session %s (path=%s)", session_id, path_used)
+        current_app.logger.error(
+            "Analytics: no filled rows found for session %s (path=%s)", session_id, path_used
+        )
         return jsonify({"ok": False, "error": "Missing filled file or no recognizable rows"}), 400
 
-    response_payload = _process_rows_into_response(rows, raw_rows_list, load_header_metadata(session_id))
+    response_payload = _process_rows_into_response(
+        rows, raw_rows_list, load_header_metadata(session_id)
+    )
     return jsonify(response_payload)
+
 
 # ---- Page ----
 @analytics_bp.get("/analytics/<session_id>")
