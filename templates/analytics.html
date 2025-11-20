@@ -187,19 +187,27 @@
       <div class="chips" id="chips-hi" style="margin-top:8px;"></div>
       <div class="chips" id="chips-some" style="margin-top:6px;"></div>
       <div class="chips" id="chips-no" style="margin-top:6px;"></div>
-    </section>
+    
+      <!-- NEW: debug explanation of how domains were bucketed -->
+      <div id="traffic-debug"
+           style="font-size:13px; color:var(--muted); margin-top:10px;"></div>
+    </section>    
 
     <section class="section page-break">
       <h2>Burden of Conversation (Parent-Reported Focus)</h2>
       <canvas id="burdenChart" width="800" aria-label="Burden chart"></canvas>
       <div style="font-size:12px;color:var(--muted); margin-top:8px;">
-        Chart shows each domain's share (sums ≈ 100%). Labels printed on bars; use
-        "Use Frequency" or "Use Quotes" to switch modes.
-      </div>
+        Chart shows each domain's share (sums ≈ 100%). Labels are printed on bars; use
+        "Use Frequency" or "Use Quotes" to switch modes. In "Use Quotes" mode, only
+        quotes where the response was <b>Yes</b> are included (quotes marked "No" are ignored).
+      </div>      
     </section>
 
     <section class="section page-break">
       <h2>Recommendations and Next Steps (Based on Parent Concerns)</h2>
+      <!-- Debug info about how recommendations were calculated -->
+      <div id="recs-debug"
+           style="font-size:13px; color:var(--muted); margin-bottom:8px;"></div>
       <ul id="recs" style="margin:0; padding-left:20px;"></ul>
     </section>
 
@@ -243,6 +251,10 @@
 
     const recsEl = document.getElementById('recs');
     const domainsEl = document.getElementById('domains');
+    const recsDebugEl = document.getElementById('recs-debug'); // NEW
+    const trafficDebugEl = document.getElementById('traffic-debug'); // NEW
+
+
 
     let chartInstance = null;
     let rows_cache = null;
@@ -323,6 +335,15 @@
       if (x < 30) return "no";
       return "some";
     }
+
+        // Backend uses: >70 -> hi, >=30 -> some, <30 -> no
+    function recConcernLevelFromPercent(p) {
+      const x = Number(p) || 0;
+      if (x > 70) return "hi";
+      if (x >= 30) return "some";
+      return "no";
+    }
+
 
     function buildChartData(domain_scores_obj, mode) {
       const labels = [];
@@ -480,7 +501,11 @@
     }
 
     function renderTrafficLights(rows, mode) {
-      chipsHi.innerHTML = ""; chipsSome.innerHTML = ""; chipsNo.innerHTML = "";
+      chipsHi.innerHTML = "";
+      chipsSome.innerHTML = "";
+      chipsNo.innerHTML = "";
+      if (trafficDebugEl) trafficDebugEl.innerHTML = "";
+
       let hiList = [], someList = [], noList = [];
       if (mode === "frequency") {
         hiList = rows?.traffic_freq_high?.list || parseList(rows?.traffic_freq_high?.value);
@@ -514,35 +539,131 @@
       finalHi.forEach(x => chipsHi.appendChild(chip(x, "hi")));
       finalSome.forEach(x => chipsSome.appendChild(chip(x, "some")));
       finalNo.forEach(x => chipsNo.appendChild(chip(x, "no")));
+
+      // ---- NEW: print the underlying percentages + levels ----
+      const domainObjects = rows?.domain_objects || {};
+      const debugLines = [];
+
+      DOMAIN_ORDER.forEach(domainName => {
+        const dobj = domainObjects[domainName] || {};
+
+        let metricName, metricValue;
+        if (mode === "quotes") {
+          metricName = "quote_share";
+          metricValue = Number(dobj.quote_share || 0);
+        } else {
+          metricName = "freq_percent";
+          metricValue = Number(dobj.freq_percent || 0);
+        }
+
+        const levelCode = recConcernLevelFromPercent(metricValue); // hi/some/no
+        const levelLabel =
+          levelCode === "hi"   ? "High concern" :
+          levelCode === "some" ? "Some concern" :
+                                 "No concern";
+
+        const bucket =
+          levelCode === "hi"   ? "High Concerns" :
+          levelCode === "some" ? "Some Concerns" :
+                                 "No Concerns";
+
+        const prettyValue = metricValue.toFixed(1);
+        debugLines.push(
+          `${domainName}: ${metricName} = ${prettyValue}% → ${levelLabel} (${levelCode}) → goes into "${bucket}".`
+        );
+      });
+
+      if (trafficDebugEl && debugLines.length) {
+        trafficDebugEl.innerHTML = debugLines
+          .map(txt => `<div>${txt}</div>`)
+          .join("");
+      }
     }
 
     function renderRecommendations(rows, mode) {
       recsEl.innerHTML = "";
+      if (recsDebugEl) recsDebugEl.innerHTML = "";
 
-      // choose correct source based on mode
-      let src = (mode === "quotes")
-          ? rows?.recommendations_quotes || rows?.recommendations
-          : rows?.recommendations_freq || rows?.recommendations;
+      // --- 1. Pick the correct source based on mode ---
+      let src;
+      if (mode === "quotes") {
+        // IMPORTANT: in quotes mode we ONLY use recommendations_quotes.
+        // We DO NOT fall back to frequency recommendations.
+        src = rows?.recommendations_quotes || null;
+      } else {
+        // Frequency mode: use freq-based list, fall back to legacy if needed.
+        src = rows?.recommendations_freq || rows?.recommendations || null;
+      }
 
-      // IMPORTANT: Use backend-provided list directly
-      let items = Array.isArray(src?.list) ? src.list : [];
+      const items = Array.isArray(src?.list) ? src.list : [];
 
-      // If empty
-      if (!items.length) {
+      // --- 2. Handle empty lists correctly ---
+      if (mode === "quotes" && (!src || !items.length)) {
+        // No domains reached some/high concern based on quote_share
         recsEl.innerHTML = "<ol><li>—</li></ol>";
+        if (recsDebugEl) {
+          recsDebugEl.textContent =
+            "No recommendations were generated in 'Use Quotes' mode because no domains reached 'some' or 'high' concern based on quote share.";
+        }
         return;
       }
 
-      // Create NUMBERED LIST
-      const ol = document.createElement("ol");   // ← numbering instead of bullets
+      if (!items.length) {
+        // For frequency mode (or legacy), nothing crossed the threshold
+        recsEl.innerHTML = "<ol><li>—</li></ol>";
+        if (recsDebugEl) {
+          recsDebugEl.textContent =
+            "No recommendations were generated because no domains reached 'some' or 'high' concern.";
+        }
+        return;
+      }
+
+      // --- 3. Build debug explanation, matching backend logic ---
+      const domainObjects = rows?.domain_objects || {};
+      const debugLines = [];
+
       items.forEach(line => {
-        const li = document.createElement("li");
-        li.textContent = line;                   // one full recommendation per domain
-        ol.appendChild(li);
+        const str = String(line || "");
+        const domainName = str.split(":")[0].trim();   // "Anxiety / Emotion" from "Anxiety / Emotion: ..."
+        const dobj = domainObjects[domainName] || {};
+
+        let metricName, metricValue;
+        if (mode === "quotes") {
+          metricName  = "quote_share";
+          metricValue = Number(dobj.quote_share || 0);
+        } else {
+          metricName  = "freq_percent";
+          metricValue = Number(dobj.freq_percent || 0);
+        }
+
+        const levelCode = recConcernLevelFromPercent(metricValue); // hi/some/no
+        const levelLabel =
+          levelCode === "hi"   ? "High concern"  :
+          levelCode === "some" ? "Some concern"  :
+                                 "No concern";
+
+        const prettyValue = metricValue.toFixed(1);
+        debugLines.push(
+          `${domainName}: ${metricName} = ${prettyValue}% → ${levelLabel} (${levelCode}) used to select this recommendation.`
+        );
       });
 
+      if (recsDebugEl && debugLines.length) {
+        recsDebugEl.innerHTML = debugLines
+          .map(txt => `<div>${txt}</div>`)
+          .join("");
+      }
+
+      // --- 4. Render the numbered recommendation list itself ---
+      const ol = document.createElement("ol");
+      items.forEach(line => {
+        const li = document.createElement("li");
+        li.textContent = line;
+        ol.appendChild(li);
+      });
       recsEl.appendChild(ol);
     }
+
 
     function makeShowMore(quotesContainer, allQuotes) {
       const MAX_VISIBLE = 6;
@@ -595,20 +716,33 @@
     function renderDomains(rows, mode) {
       domainsEl.innerHTML = "";
       const domain_objects = rows.domain_objects || {};
+
       for (const title of DOMAIN_ORDER) {
         const key = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
         const obj = domain_objects[title] || rows[key] || {};
 
-        const card = document.createElement('div'); card.className = "domain-card";
-        const h = document.createElement('div'); h.className = "domain-title";
-        const left = document.createElement('div'); left.textContent = title;
+        const card = document.createElement('div');
+        card.className = "domain-card";
+
+        // ---- header (title + badge) ----
+        const h = document.createElement('div');
+        h.className = "domain-title";
+        const left = document.createElement('div');
+        left.textContent = title;
+
         const level = (() => {
-          if (mode === "frequency") return levelFromPercent(obj.freq_percent || obj.freq_share || 0);
+          if (mode === "frequency") {
+            return levelFromPercent(obj.freq_percent || obj.freq_share || 0);
+          }
           return levelFromPercent(obj.quote_share || 0);
         })();
         const right = badge(level);
-        h.appendChild(left); h.appendChild(right); card.appendChild(h);
 
+        h.appendChild(left);
+        h.appendChild(right);
+        card.appendChild(h);
+
+        // ---- main line / description ----
         const valLine = document.createElement('div');
         valLine.style.fontWeight = '600';
         valLine.style.marginBottom = '6px';
@@ -616,40 +750,76 @@
         valLine.textContent = shownText || "—";
         card.appendChild(valLine);
 
-        let quotesList = Array.isArray(obj.unique_quotes)
-          ? obj.unique_quotes
-          : (obj.unique_quotes ? [obj.unique_quotes] : []);
-        if (!quotesList.length && obj.all_quotes_text) {
-          quotesList = String(obj.all_quotes_text || "")
-            .split(/(?<=\.)\s+/)
-            .map(s => s.trim())
-            .filter(Boolean);
-        }
+        // ---- quotes: YES vs NO, no inference ----
+        const yesQuotes = Array.isArray(obj.yes_quotes)
+          ? obj.yes_quotes
+          : (Array.isArray(obj.unique_quotes) ? obj.unique_quotes : []);
+
+        const noQuotes = Array.isArray(obj.no_quotes) ? obj.no_quotes : [];
 
         const quotesContainer = document.createElement('div');
         quotesContainer.className = 'quotes-list';
-        if (quotesList.length) {
-          makeShowMore(quotesContainer, quotesList);
-        } else if (obj.quote) {
-          const qdiv = document.createElement('div');
-          qdiv.className = "quote-line";
-          qdiv.textContent = '“' + String(obj.quote).replace(/^["“]+|["”]+$/g,'') + '”';
-          quotesContainer.appendChild(qdiv);
-        } else {
+
+        if (yesQuotes.length) {
+          const labelYes = document.createElement('div');
+          labelYes.style.fontWeight = '600';
+          labelYes.style.fontSize = '13px';
+          labelYes.textContent = 'Yes (used in charts):';
+          quotesContainer.appendChild(labelYes);
+
+          const yesListContainer = document.createElement('div');
+          yesListContainer.className = 'quotes-list';
+          makeShowMore(yesListContainer, yesQuotes);
+          quotesContainer.appendChild(yesListContainer);
+        }
+
+        if (noQuotes.length) {
+          const labelNo = document.createElement('div');
+          labelNo.style.fontWeight = '600';
+          labelNo.style.fontSize = '13px';
+          labelNo.style.marginTop = '4px';
+          labelNo.textContent = 'No (ignored in charts):';
+          quotesContainer.appendChild(labelNo);
+
+          const noListContainer = document.createElement('div');
+          noListContainer.className = 'quotes-list';
+          makeShowMore(noListContainer, noQuotes);
+          quotesContainer.appendChild(noListContainer);
+        }
+
+        // If we have no quotes at all, show a simple dash
+        if (!yesQuotes.length && !noQuotes.length) {
           const qdiv = document.createElement('div');
           qdiv.className = "quote-line";
           qdiv.style.opacity = 0.8;
           qdiv.textContent = "—";
           quotesContainer.appendChild(qdiv);
         }
+
         card.appendChild(quotesContainer);
 
+        // ---- meta footer: counts ----
         const meta = document.createElement('div');
         meta.style.marginTop = '8px';
         meta.style.color = 'var(--muted)';
         meta.style.fontSize = '13px';
-        const quoteCount = Number(obj.quote_count || (quotesList.length)) || 0;
-        meta.textContent = `Quotes: ${quoteCount}`;
+
+        const yesCount =
+          yesQuotes.length ||
+          Number(obj.quote_yes_count || obj.quote_count || 0) || 0;
+        const noCount =
+          noQuotes.length ||
+          Number(obj.quote_no_count || 0) || 0;
+
+        if (noCount > 0) {
+          meta.textContent =
+            `Quotes marked "Yes" (used in charts): ${yesCount} | ` +
+            `marked "No" (ignored in charts): ${noCount}`;
+        } else {
+          meta.textContent =
+            `Quotes marked "Yes" (used in charts): ${yesCount}`;
+        }
+
         card.appendChild(meta);
 
         domainsEl.appendChild(card);
@@ -662,6 +832,8 @@
       summaryEl.textContent = "Loading…";
       quoteEl.textContent = "";
       recsEl.innerHTML = "";
+      if (recsDebugEl) recsDebugEl.innerHTML = "";
+      if (trafficDebugEl) trafficDebugEl.innerHTML = "";
       domainsEl.innerHTML = "";
       chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
       try {
@@ -723,6 +895,8 @@
       summaryEl.textContent = "Loading…";
       quoteEl.textContent = "";
       recsEl.innerHTML = "";
+      if (recsDebugEl) recsDebugEl.innerHTML = "";
+      if (trafficDebugEl) trafficDebugEl.innerHTML = "";
       domainsEl.innerHTML = "";
       chipsHi.innerHTML = chipsSome.innerHTML = chipsNo.innerHTML = "";
 

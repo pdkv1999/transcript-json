@@ -133,6 +133,62 @@ DOMAIN_KEYWORDS = {
     "Strengths / Interests": ["strength", "interest", "likes", "hobby", "talent", "strengths"],
 }
 
+def _canonical_domain_from_label(label: str) -> Optional[str]:
+    """
+    Map a free-text domain label from the Excel (e.g. 'Anxiety/emotions',
+    'School', 'Social & communication') to the closest canonical domain name
+    in DOMAIN_CANON.
+    """
+    if not label:
+        return None
+
+    raw = str(label).strip()
+    s = raw.lower()
+
+    # Exact / substring matches first
+    for canon in DOMAIN_CANON:
+        c_low = canon.lower()
+        if s == c_low:
+            return canon
+        if s in c_low or c_low in s:
+            return canon
+
+    # Very small alias normalisations
+    alias_map = {
+        "anxiety": "Anxiety / Emotion",
+        "anxiety / emotions": "Anxiety / Emotion",
+        "anxiety/emotion": "Anxiety / Emotion",
+        "attention": "Attention / ADHD",
+        "adhd": "Attention / ADHD",
+        "school": "School Life",
+        "school life / learning": "School Life",
+        "learning": "Learning / Dyslexia",
+        "reading / dyslexia": "Learning / Dyslexia",
+        "social": "Social / Communication",
+        "social communication": "Social / Communication",
+        "motor": "Motor Skills",
+        "motor skills / coordination": "Motor Skills",
+        "sleep & routine": "Sleep",
+        "home life": "Home Life / Routine",
+        "strengths": "Strengths / Interests",
+    }
+    if s in alias_map:
+        return alias_map[s]
+
+    # Fallback: closest fuzzy match
+    best = None
+    best_score = 0.0
+    for canon in DOMAIN_CANON:
+        score = difflib.SequenceMatcher(None, s, canon.lower()).ratio()
+        if score > best_score:
+            best_score = score
+            best = canon
+
+    if best and best_score >= 0.55:
+        return best
+
+    return None
+
 # ---------------------- helpers ----------------------
 
 
@@ -414,24 +470,61 @@ def _domain_label_from_row_key_or_text(text: str) -> str:
 
 
 def _find_domain_rows_in_raw_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Group raw rows by domain.
+
+    Priority:
+      1. If the row has an explicit domain column
+         (e.g. 'Parent-Friendly Domain', 'Domain'), use that.
+      2. Otherwise, fall back to keyword / label-based guessing.
+    """
     domain_candidates: Dict[str, List[Dict[str, Any]]] = {d: [] for d in DOMAIN_CANON}
+
     for r in rows_list:
+        # ---------- 1) Try explicit domain column ----------
+        explicit_dom = None
+        for col in (
+            "Parent-Friendly Domain",
+            "parent-friendly domain",
+            "Parent friendly domain",
+            "parent friendly domain",
+            "Domain",
+            "domain",
+        ):
+            if col in r and r[col] not in (None, ""):
+                explicit_dom = _canonical_domain_from_label(r[col])
+                break
+
+        if explicit_dom:
+            domain_candidates[explicit_dom].append(r)
+            continue  # do not re-guess – we trust the explicit domain
+
+        # ---------- 2) Fallback: keyword / label detection ----------
         combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
         combined_text_lower = combined_text.lower()
         assigned = set()
+
+        # a) keyword scan
         for domain, kws in DOMAIN_KEYWORDS.items():
             for kw in kws:
                 if kw in combined_text_lower:
                     domain_candidates[domain].append(r)
                     assigned.add(domain)
                     break
-        if not assigned:
-            for k in ("row_key", "row_label", "label", "question", "possible parent-friendly question"):
-                if k in r and r[k]:
-                    dom = _domain_label_from_row_key_or_text(str(r[k]))
-                    if dom in domain_candidates:
-                        domain_candidates[dom].append(r)
-                        break
+
+        if assigned:
+            continue
+
+        # b) look at row label / question text
+        for k in ("row_key", "row_label", "label", "question", "possible parent-friendly question"):
+            if k in r and r[k]:
+                dom = _canonical_domain_from_label(str(r[k]))
+                if dom and dom in domain_candidates:
+                    domain_candidates[dom].append(r)
+                    assigned.add(dom)
+                    break
+
+        # If still nothing, leave unassigned (row won't influence any domain)
     return domain_candidates
 
 
@@ -601,6 +694,31 @@ def _normalize_quote_text(q: str) -> str:
     return s
 
 
+# NEW: helpers to detect / strip "inferred" text
+def _is_inferred_text(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r"\binferred\b", str(text), flags=re.IGNORECASE))
+
+
+def _strip_inferred_text(text: Optional[str]) -> Optional[str]:
+    """
+    For summary fields: remove any 'inferred ...' part.
+    If the whole thing is inferred, return None.
+    """
+    if not text:
+        return None
+    s = str(text)
+    if not _is_inferred_text(s):
+        s = s.strip()
+        return s or None
+
+    # If "inferred" appears, drop everything from that word onwards
+    parts = re.split(r"\binferred\b", s, flags=re.IGNORECASE)
+    cleaned = parts[0].strip()
+    return cleaned or None
+
+
 def _dedupe_quotes(quotes: List[str], threshold: float = 0.90) -> List[str]:
     """Dedupe by similarity >= threshold using difflib.SequenceMatcher."""
     unique: List[str] = []
@@ -623,33 +741,74 @@ def _dedupe_quotes(quotes: List[str], threshold: float = 0.90) -> List[str]:
 
 
 def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    # Initialize
+    """
+    Aggregate frequency + quote stats per domain.
+
+    - Domain assignment:
+        1) use explicit Domain / Parent-Friendly Domain column if present
+        2) otherwise fall back to keyword / label guessing
+    - Quotes are split into:
+        * YES quotes   -> used in charts / percentages.
+        * NO  quotes   -> shown in UI but NOT used in maths.
+    - Any text containing 'inferred' is ignored completely.
+    """
     domain_buckets = {
-        d: {"always": 0, "some": 0, "never": 0, "unknown": 0, "quotes": []} for d in DOMAIN_CANON
+        d: {
+            "always": 0,
+            "some": 0,
+            "never": 0,
+            "unknown": 0,
+            "yes_quotes_raw": [],
+            "no_quotes_raw": [],
+        }
+        for d in DOMAIN_CANON
     }
 
+    # we still pre-compute candidates for the guessing fallback
     domain_candidates = _find_domain_rows_in_raw_rows(rows_list)
 
-    # For every raw row, assign to a domain and update counts & collect quotes
     for r in rows_list:
-        combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
-        txt_lower = combined_text.lower()
+        # ---------- 1) try explicit domain column ----------
         domain = None
-        for dom, kws in DOMAIN_KEYWORDS.items():
-            for kw in kws:
-                if kw in txt_lower:
-                    domain = dom
-                    break
-            if domain:
+        for col in (
+            "Parent-Friendly Domain",
+            "parent-friendly domain",
+            "Parent friendly domain",
+            "parent friendly domain",
+            "Domain",
+            "domain",
+        ):
+            if col in r and r[col] not in (None, ""):
+                domain = _canonical_domain_from_label(r[col])
                 break
+
+        # ---------- 2) fallback: reuse candidate mapping / keyword logic ----------
         if not domain:
+            combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
+            txt_lower = combined_text.lower()
+
+            # a) direct keyword scan
+            for dom, kws in DOMAIN_KEYWORDS.items():
+                for kw in kws:
+                    if kw in txt_lower:
+                        domain = dom
+                        break
+                if domain:
+                    break
+
+        if not domain:
+            # b) see if this row is one of the pre-grouped candidates
             for dom, cand_list in domain_candidates.items():
                 if r in cand_list:
                     domain = dom
                     break
+
         if not domain:
+            # c) final best-hit keyword fallback
             best_dom = None
             best_hits = 0
+            combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
+            txt_lower = combined_text.lower()
             for dom, kws in DOMAIN_KEYWORDS.items():
                 hits = sum(1 for kw in kws if kw in txt_lower)
                 if hits > best_hits:
@@ -657,9 +816,13 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
                     best_dom = dom
             if best_dom and best_hits > 0:
                 domain = best_dom
+
         if not domain:
+            # cannot assign this row to any domain – skip it
             continue
 
+        # ---------- Frequency aggregation ----------
+        combined_text = " ".join([_flatten_cell_value(r.get(k)) for k in r.keys() if r.get(k)])
         freq_raw = None
         for fk in (
             "frequency_code",
@@ -684,36 +847,84 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             domain_buckets[domain].setdefault(norm, 0)
             domain_buckets[domain][norm] += 1
 
-        # collect quotes if present in any quote-like key
+        # ---------- YES/NO flag for quotes ----------
+        quote_flag = None  # 'yes', 'no', or None
+
+        # 1) explicit "use quote" style columns
+        for fk in (
+            "use_quotes",
+            "use quotes",
+            "use_quote",
+            "use quote",
+            "include_quote",
+            "include quote",
+            "use_in_report",
+            "use in report",
+            "use this quote",
+            "use this quote?",
+        ):
+            if fk in r and r[fk] not in (None, ""):
+                val = _flatten_cell_value(r[fk]).lower()
+                if val.startswith("y") or val == "1" or val == "yes":
+                    quote_flag = "yes"
+                elif val.startswith("n") or val == "0" or val == "no":
+                    quote_flag = "no"
+                break
+
+        # 2) fallback to response/response_code if they look like Yes/No
+        if quote_flag is None:
+            for fk in ("response_code", "response", "quote_response", "quote_response_code"):
+                if fk in r and r[fk] not in (None, ""):
+                    val = _flatten_cell_value(r[fk]).lower()
+                    if val in ("yes", "y", "no", "n"):
+                        quote_flag = "yes" if val in ("yes", "y") else "no"
+                        break
+
+        # default: if no explicit flag, treat as YES so you don't lose older data
+        if quote_flag is None:
+            quote_flag = "yes"
+
+        # ---------- collect quotes (no 'inferred') ----------
         for qk in ("quote", "evidence", "support", "found_quote", "supporting_quote"):
             if qk in r and r[qk] not in (None, ""):
-                domain_buckets[domain]["quotes"].append(str(r[qk]).strip())
+                text = str(r[qk]).strip()
+                if not text:
+                    continue
+                if _is_inferred_text(text):
+                    # completely drop 'inferred' statements
+                    continue
+                if quote_flag == "no":
+                    domain_buckets[domain]["no_quotes_raw"].append(text)
+                else:
+                    domain_buckets[domain]["yes_quotes_raw"].append(text)
 
-    # compute weighted sums and percent (frequency-based) and quote counts
+    # ---------- build aggregated results ----------
     results: Dict[str, Dict[str, Any]] = {}
     weighted_totals_sum = 0
+
     for domain, counts in domain_buckets.items():
         a = counts.get("always", 0)
         s = counts.get("some", 0)
         n = counts.get("never", 0)
         total = a + s + n
-        weighted_sum = 2 * a + 1 * s + 0 * n
+        weighted_sum = 2 * a + 1 * s
 
-        # normalize percent by maximum possible weighted score (2 * total) so percent is 0..100
         if total > 0:
             percent = (weighted_sum / float(2 * total)) * 100.0
         else:
             percent = 0.0
         percent = round(percent, 1)
 
-        quotes = counts.get("quotes", []) or []
-        unique_quotes = _dedupe_quotes(quotes)
+        yes_unique = _dedupe_quotes(counts.get("yes_quotes_raw", []))
+        no_unique = _dedupe_quotes(counts.get("no_quotes_raw", []))
+
         MAX_QUOTES_PER_DOMAIN = 12
-        if len(unique_quotes) > MAX_QUOTES_PER_DOMAIN:
-            truncated = unique_quotes[:MAX_QUOTES_PER_DOMAIN]
-        else:
-            truncated = unique_quotes
-        qcount = len(unique_quotes)
+        yes_trunc = yes_unique[:MAX_QUOTES_PER_DOMAIN]
+        no_trunc = no_unique[:MAX_QUOTES_PER_DOMAIN]
+
+        q_yes_count = len(yes_unique)
+        q_no_count = len(no_unique)
+
         results[domain] = {
             "counts": {
                 "always": a,
@@ -724,13 +935,18 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             "weighted_sum": weighted_sum,
             "total_count": total,
             "percent": percent,
-            "unique_quotes": truncated,
-            "quote_count": qcount,
-            "quote_total_text": " ".join(unique_quotes),
+            "yes_quotes": yes_trunc,
+            "no_quotes": no_trunc,
+            "quote_count": q_yes_count,          # YES only – used for maths
+            "quote_yes_count": q_yes_count,
+            "quote_no_count": q_no_count,
+            "quote_total_text": " ".join(yes_unique),
+            # note: quote_share & freq_share filled below
         }
+
         weighted_totals_sum += weighted_sum
 
-    # compute share for frequency
+    # frequency share
     if weighted_totals_sum > 0:
         for domain, info in results.items():
             info["freq_share"] = round(
@@ -740,7 +956,7 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
         for domain in results:
             results[domain]["freq_share"] = 0.0
 
-    # quote shares
+    # quote share – YES quotes only
     total_quote_count = sum(info["quote_count"] for info in results.values())
     if total_quote_count > 0:
         for domain, info in results.items():
@@ -752,7 +968,6 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
             results[domain]["quote_share"] = 0.0
 
     return results
-
 
 def _percent_to_level(percent: float) -> str:
     if percent is None:
@@ -904,10 +1119,12 @@ def _build_recommendations_from_domains(
     """
     Build recommendations using either:
       - mode="frequency": freq_percent
-      - mode="quotes":    quote_share
+      - mode="quotes":    quote_share (based on YES quotes only)
 
-    For each domain we map its concern level (hi/some/no) to the
-    (Parent-Friendly Domain, Concern Level) row in the recommendations table.
+    Thresholds (same as traffic lights):
+        > 70      -> "hi"   (High concern)
+        >= 30     -> "some" (Some concern)
+        < 30      -> "no"   (No concern, recommendation suppressed)
     """
     table = _load_recommendations_table()
     if not table:
@@ -915,17 +1132,17 @@ def _build_recommendations_from_domains(
 
     lines: List[str] = []
     for domain_name, dobj in domain_objects.items():
-        # Choose which metric to use for concern level
+        # Choose the metric based on mode
         if mode == "quotes":
             metric = dobj.get("quote_share", 0.0)
-        else:  # default: frequency
+        else:
             metric = dobj.get("freq_percent", 0.0)
 
         lvl_code = _percent_to_level(metric)  # "hi" | "some" | "no"
 
-        # OPTIONAL: skip "no concern" if you only want hi/some
-        # if lvl_code == "no":
-        #     continue
+        # Do NOT generate recommendations for "no concern"
+        if lvl_code == "no":
+            continue
 
         dom_key = _norm_domain_for_lookup(domain_name)
         rec_text = table.get((dom_key, lvl_code))
@@ -1131,9 +1348,14 @@ def _process_rows_into_response(
                 rep_val = rep.get("value") or rep_val
                 rep_quote = rep.get("quote") or rep_quote
 
-        # If no explicit quote but we have quotes in agg, use the first one
-        if not rep_quote and info.get("unique_quotes"):
-            rep_quote = info["unique_quotes"][0] if len(info["unique_quotes"]) > 0 else None
+        # Clean out any 'inferred' text from value / quote
+        rep_val = _strip_inferred_text(rep_val)
+        rep_quote = _strip_inferred_text(rep_quote)
+
+        # Representative quote = first YES quote (if we have any)
+        yes_quotes = info.get("yes_quotes", []) or []
+        if not rep_quote and yes_quotes:
+            rep_quote = _strip_inferred_text(yes_quotes[0])
 
         domain_objects[domain] = {
             "value": rep_val,
@@ -1142,10 +1364,14 @@ def _process_rows_into_response(
             "freq_percent": info.get("percent", 0.0),
             "freq_share": info.get("freq_share", 0.0),
             "quote_count": info.get("quote_count", 0),
+            "quote_yes_count": info.get("quote_yes_count", 0),
+            "quote_no_count": info.get("quote_no_count", 0),
             "quote_share": info.get("quote_share", 0.0),
-            "unique_quotes": info.get("unique_quotes", [])
-            if isinstance(info.get("unique_quotes", []), list)
-            else [],
+            # explicit lists for UI (already filtered for 'inferred')
+            "yes_quotes": yes_quotes,
+            "no_quotes": info.get("no_quotes", []) or [],
+            # keep legacy fields but only from YES quotes
+            "unique_quotes": yes_quotes,
             "all_quotes_text": info.get("quote_total_text", ""),
         }
 
@@ -1200,7 +1426,11 @@ def _process_rows_into_response(
             "freq_percent": dobj.get("freq_percent", 0.0),
             "freq_share": dobj.get("freq_share", 0.0),
             "quote_count": dobj.get("quote_count", 0),
+            "quote_yes_count": dobj.get("quote_yes_count", 0),
+            "quote_no_count": dobj.get("quote_no_count", 0),
             "quote_share": dobj.get("quote_share", 0.0),
+            "yes_quotes": dobj.get("yes_quotes", []),
+            "no_quotes": dobj.get("no_quotes", []),
             "unique_quotes": dobj.get("unique_quotes", []),
             "all_quotes_text": dobj.get("all_quotes_text", ""),
         }
@@ -1241,13 +1471,16 @@ def _process_rows_into_response(
             "freq_share": info.get("freq_share", 0.0),
             "quote_share": info.get("quote_share", 0.0),
             "quote_count": info.get("quote_count", 0),
+            "quote_yes_count": info.get("quote_yes_count", 0),
+            "quote_no_count": info.get("quote_no_count", 0),
         }
+
 
     rows_out["domain_objects"] = domain_objects
     rows_out["domain_scores"] = domain_scores
 
-    # ---------------- Header: merge meta + Excel rows ----------------
-    # Start from provided header_meta or sensible defaults
+    # ---------------- Header: meta first, then gentle Q&A backfill ----------------
+    # 1) Start from header_meta if provided (report_meta.json / upload header)
     if header_meta:
         header = dict(header_meta)
     else:
@@ -1264,35 +1497,26 @@ def _process_rows_into_response(
     # Ensure required keys exist
     header.setdefault("child_name", "—")
     header.setdefault("child_age", "—")
-    header.setdefault("parent_respondent", "—")
-    header.setdefault("interviewer", "—")
-    header.setdefault("referral_source", "—")
-    header.setdefault("report_title", "Parent Telephone Interview Summary")
     header.setdefault(
         "date_of_interview",
         datetime.utcnow().strftime("%d %b %Y"),
     )
+    header.setdefault("parent_respondent", "—")
+    header.setdefault("interviewer", "—")
+    header.setdefault("referral_source", "—")
+    header.setdefault("report_title", "Parent Telephone Interview Summary")
 
-    # Helper: if header field is empty/placeholder, try to fill from mapped_rows
-    def _fill_header_from_rows(header_key: str, row_key: str):
-        if header.get(header_key) not in (None, "", "—"):
-            return
-        row = mapped_rows.get(row_key)
-        if row and row.get("value") not in (None, ""):
-            header[header_key] = str(row["value"]).strip()
-
-    _fill_header_from_rows("child_name", "child_name")
-    _fill_header_from_rows("child_age", "child_age")
-    _fill_header_from_rows("parent_respondent", "parent_respondent")
-    _fill_header_from_rows("interviewer", "interviewer")
-    _fill_header_from_rows("referral_source", "referral_source")
-
-        # Extra safety: backfill header fields directly from the raw Excel Q&A rows
+    # 2) NEW: backfill ONLY from the structured Q&A rows
+    #    (What is your child's full name?, How old is your child?, etc.)
+    #    We do NOT use domain rows or quotes here.
     try:
         basic = _extract_basic_info_from_rows_list(rows_list)
         for hk, val in basic.items():
-            if val and header.get(hk) in (None, "", "—"):
-                header[hk] = val
+            if not val:
+                continue
+            cleaned = _strip_inferred_text(val)
+            if cleaned and header.get(hk) in (None, "", "—"):
+                header[hk] = cleaned
     except Exception as e:
         current_app.logger.warning("Header backfill from rows_list failed: %s", e)
 
@@ -1314,7 +1538,8 @@ def _process_rows_into_response(
                 row = rows_out[dk] or {}
                 txt = row.get("quote") or row.get("value")
 
-        return str(txt).strip() if txt else ""
+        cleaned = _strip_inferred_text(txt)
+        return cleaned or ""
 
     child_name = header.get("child_name") or "—"
     child_age = header.get("child_age") or "—"
