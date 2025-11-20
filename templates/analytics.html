@@ -139,6 +139,12 @@
     @media (max-width:900px) {
       .meta { grid-template-columns: repeat(2, 1fr); }
     }
+    .chart-controls {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
@@ -174,16 +180,21 @@
     <input id="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xls" style="display:none" />
 
     <section class="section">
-      <h2>Summary of Key Findings</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <h2 style="margin:0;">Summary of Key Findings</h2>
+        <button id="llmSummaryBtn" class="mode">
+          Reframe as clinician
+        </button>
+      </div>
       <div id="summary" class="summary">Loading…</div>
       <div id="parent-quote" class="quote"></div>
-    </section>
+    </section>    
 
     <section class="section page-break">
       <h2>Traffic-Light Summary of Concerns</h2>
       <div><b>High Concerns:</b> <span id="tl-high">—</span></div>
       <div style="margin-top:6px;"><b>Some Concerns:</b> <span id="tl-some">—</span></div>
-      <div style="margin-top:6px;"><b>No Concerns:</b> <span id="tl-no">—</span></div>
+      <div style="margin-top:6px;"><b>Low Concerns:</b> <span id="tl-no">—</span></div>
       <div class="chips" id="chips-hi" style="margin-top:8px;"></div>
       <div class="chips" id="chips-some" style="margin-top:6px;"></div>
       <div class="chips" id="chips-no" style="margin-top:6px;"></div>
@@ -196,6 +207,13 @@
     <section class="section page-break">
       <h2>Burden of Conversation (Parent-Reported Focus)</h2>
       <canvas id="burdenChart" width="800" aria-label="Burden chart"></canvas>
+
+      <!-- NEW: controls for labels + sort -->
+      <div class="chart-controls">
+        <button id="toggleLabelsBtn">Hide % labels</button>
+        <button id="sortOrderBtn">Sort: Descending</button>
+      </div>
+
       <div style="font-size:12px;color:var(--muted); margin-top:8px;">
         Chart shows each domain's share (sums ≈ 100%). Labels are printed on bars; use
         "Use Frequency" or "Use Quotes" to switch modes. In "Use Quotes" mode, only
@@ -234,6 +252,8 @@
     const modeQuotesBtn = document.getElementById('modeQuotes');
     const uploadBtn = document.getElementById('uploadBtn');
     const fileInput = document.getElementById('fileInput');
+    const llmSummaryBtn = document.getElementById('llmSummaryBtn'); // NEW
+
 
     const statusEl = document.getElementById('status');
     const stampEl = document.getElementById('stamp');
@@ -253,12 +273,15 @@
     const domainsEl = document.getElementById('domains');
     const recsDebugEl = document.getElementById('recs-debug'); // NEW
     const trafficDebugEl = document.getElementById('traffic-debug'); // NEW
-
-
+    const toggleLabelsBtn = document.getElementById('toggleLabelsBtn'); // NEW
+    const sortOrderBtn = document.getElementById('sortOrderBtn');       // NEW
 
     let chartInstance = null;
     let rows_cache = null;
     let currentMode = "frequency"; // or "quotes"
+    let showBarPercentLabels = true;   // NEW: toggle bar labels
+    let chartSortOrder = "desc";       // NEW: 'asc' | 'desc' (default desc)
+
 
     const DOMAIN_ORDER = [
       "Anxiety / Emotion",
@@ -345,9 +368,10 @@
     }
 
 
-    function buildChartData(domain_scores_obj, mode) {
+    function buildChartData(domain_scores_obj, mode, sortOrder) {
       const labels = [];
       const values = [];
+
       DOMAIN_ORDER.forEach(d => {
         let val = 0;
         const entry = domain_scores_obj && domain_scores_obj[d];
@@ -369,19 +393,73 @@
         for (let i=0;i<values.length;i++) values[i] = (values[i] / sum) * 100;
       }
       const rounded = values.map(v => Math.round(v * 10) / 10);
-      return { labels, values: rounded };
+
+      // NEW: sort by value according to sortOrder
+      const items = labels.map((label, idx) => ({ label, value: rounded[idx] }));
+      if (sortOrder === 'asc') {
+        items.sort((a, b) => a.value - b.value);
+      } else if (sortOrder === 'desc') {
+        items.sort((a, b) => b.value - a.value);
+      }
+
+      return {
+        labels: items.map(i => i.label),
+        values: items.map(i => i.value)
+      };
+    }
+    function buildChartData(domain_scores_obj, mode, sortOrder) {
+      const labels = [];
+      const values = [];
+
+      DOMAIN_ORDER.forEach(d => {
+        let val = 0;
+        const entry = domain_scores_obj && domain_scores_obj[d];
+        if (!entry) {
+          val = 0;
+        } else {
+          if (mode === "frequency") {
+            val = Number(entry.freq_share || entry.freq_percent || 0);
+          } else {
+            val = Number(entry.quote_share || 0);
+          }
+        }
+        labels.push(d);
+        values.push(Math.max(0, Number(val)));
+      });
+
+      const sum = values.reduce((a,b) => a+b, 0);
+      if (sum > 0 && !(Math.abs(sum - 100) <= 1)) {
+        for (let i=0;i<values.length;i++) values[i] = (values[i] / sum) * 100;
+      }
+      const rounded = values.map(v => Math.round(v * 10) / 10);
+
+      // NEW: sort by value according to sortOrder
+      const items = labels.map((label, idx) => ({ label, value: rounded[idx] }));
+      if (sortOrder === 'asc') {
+        items.sort((a, b) => a.value - b.value);
+      } else if (sortOrder === 'desc') {
+        items.sort((a, b) => b.value - a.value);
+      }
+
+      return {
+        labels: items.map(i => i.label),
+        values: items.map(i => i.value)
+      };
     }
 
     const BarLabelPlugin = {
       id: 'barLabelPlugin',
       afterDatasetsDraw(chart, args, pluginOptions) {
+        const showLabels = chart?.options?.plugins?.barLabelPlugin?.showLabels;
+        if (!showLabels) return; // respect toggle
+
         const ctx = chart.ctx;
         chart.data.datasets.forEach((dataset, dsIndex) => {
           const meta = chart.getDatasetMeta(dsIndex);
           meta.data.forEach((bar, index) => {
             const val = dataset.data[index];
             if (val === null || val === undefined) return;
-            const label = (Math.round(Number(val) * 10) / 10) + '%';
+            const label = (Math.round(Number(val) * 10) / 10);
             ctx.save();
             ctx.font = '12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial';
             ctx.fillStyle = '#111827';
@@ -437,12 +515,14 @@
             x: {
               beginAtZero: true,
               suggestedMax: suggestedMax,
+              grid: { display: false }, // NEW: no vertical grid lines
               ticks: {
-                callback: (v) => `${v}%`
+                callback: (v) => v
               }
             },
             y: {
               ticks: { autoSkip: false },
+              grid: { display: false }  // NEW: no horizontal grid lines
             }
           },
           plugins: {
@@ -451,6 +531,10 @@
               callbacks: {
                 label: function(ctx) { return `${ctx.parsed.x}%`; }
               }
+            },
+            // NEW: pass flag down to plugin
+            barLabelPlugin: {
+              showLabels: showBarPercentLabels
             }
           }
         },
@@ -461,7 +545,7 @@
     }
 
     function renderBurdenChart(domain_scores_obj, mode) {
-      const { labels, values } = buildChartData(domain_scores_obj, mode);
+      const { labels, values } = buildChartData(domain_scores_obj, mode, chartSortOrder);
       createBurdenChart(labels, values, { responsive: true, maintainAspectRatio: true });
     }
 
@@ -565,7 +649,7 @@
         const bucket =
           levelCode === "hi"   ? "High Concerns" :
           levelCode === "some" ? "Some Concerns" :
-                                 "No Concerns";
+                                 "Low Concerns";
 
         const prettyValue = metricValue.toFixed(1);
         debugLines.push(
@@ -717,7 +801,30 @@
       domainsEl.innerHTML = "";
       const domain_objects = rows.domain_objects || {};
 
-      for (const title of DOMAIN_ORDER) {
+      // NEW: Sort domains by concern level (High → Some → No)
+const sortedDomains = DOMAIN_ORDER.slice().sort((a, b) => {
+    const objA = domain_objects[a] || {};
+    const objB = domain_objects[b] || {};
+
+    // Select correct metric based on mode
+    const valA = mode === "frequency"
+        ? Number(objA.freq_percent || objA.freq_share || 0)
+        : Number(objA.quote_share || 0);
+
+    const valB = mode === "frequency"
+        ? Number(objB.freq_percent || objB.freq_share || 0)
+        : Number(objB.quote_share || 0);
+
+    // Determine concern level using your existing function
+    const lvlA = recConcernLevelFromPercent(valA); // hi / some / no
+    const lvlB = recConcernLevelFromPercent(valB);
+
+    const rank = { "hi": 1, "some": 2, "no": 3 };
+
+    return rank[lvlA] - rank[lvlB];
+});
+
+for (const title of sortedDomains) {
         const key = 'domain_' + title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
         const obj = domain_objects[title] || rows[key] || {};
 
@@ -1000,6 +1107,129 @@
       if (!f) return;
       uploadAndGenerate(f);
       fileInput.value = "";
+    });
+
+        // NEW: toggle % labels on bars
+        toggleLabelsBtn.addEventListener('click', () => {
+  showBarPercentLabels = !showBarPercentLabels;
+
+  toggleLabelsBtn.textContent = showBarPercentLabels
+    ? 'Hide % labels'
+    : 'Show % labels';
+
+  if (chartInstance) {
+    // Toggle bar labels
+    chartInstance.options.plugins.barLabelPlugin.showLabels = showBarPercentLabels;
+
+    // Toggle x-axis tick numbers ALSO
+    chartInstance.options.scales.x.ticks.display = showBarPercentLabels;
+
+    chartInstance.update();
+  }
+});
+
+    // NEW: toggle sort order asc/desc
+    sortOrderBtn.addEventListener('click', () => {
+      chartSortOrder = (chartSortOrder === 'desc') ? 'asc' : 'desc';
+      sortOrderBtn.textContent =
+        chartSortOrder === 'desc' ? 'Sort: Descending' : 'Sort: Ascending';
+
+      if (rows_cache) {
+        const domain_scores = rows_cache.domain_scores || {};
+        renderBurdenChart(domain_scores, currentMode);
+      }
+    });
+
+        // NEW: ask LLM to reframe the summary in clinician voice
+        llmSummaryBtn.addEventListener('click', async () => {
+      if (!rows_cache) {
+        // Ensure we have data first
+        await regenerate();
+        if (!rows_cache) {
+          showStatus("No analytics data available to rewrite summary.", "err");
+          return;
+        }
+      }
+
+      const originalSummary =
+        (rows_cache?.summary_overview?.value ||
+         rows_cache?.summary_overview ||
+         summaryEl.textContent ||
+         "").trim();
+
+      if (!originalSummary) {
+        showStatus("Summary is empty – nothing to rewrite.", "err");
+        return;
+      }
+
+      const childName = document.getElementById("child-name").textContent || "";
+      const childAge = document.getElementById("child-age").textContent || "";
+      const parentName = document.getElementById("parent").textContent || "";
+      const interviewer = document.getElementById("interviewer").textContent || "";
+
+      llmSummaryBtn.disabled = true;
+      const oldLabel = llmSummaryBtn.textContent;
+      llmSummaryBtn.textContent = "Reframing…";
+      showStatus("Asking AI to reframe the summary in clinician style…", "ok");
+
+      try {
+        const res = await fetch(
+          `/api/analytics/${encodeURIComponent(sessionId)}/summary/rewrite`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              summary: originalSummary,
+              child_name: childName,
+              child_age: childAge,
+              parent_respondent: parentName,
+              interviewer: interviewer,
+            }),
+          }
+        );
+
+        if (!res.ok) {
+          const txt = await res.text();
+          console.error("LLM summary rewrite failed:", res.status, txt);
+          showStatus(
+            "Summary rewrite failed (" + res.status + "). See console/server logs.",
+            "err"
+          );
+          return;
+        }
+
+        const data = await res.json();
+        if (!data || !data.ok || !data.summary) {
+          showStatus(
+            "AI rewrite did not return a usable summary.",
+            "err"
+          );
+          return;
+        }
+
+        const newSummary = data.summary;
+        summaryEl.textContent = newSummary;
+
+        // keep cache in sync so print/save use the updated text
+        if (!rows_cache.summary_overview) {
+          rows_cache.summary_overview = {};
+        }
+        rows_cache.summary_overview.value = newSummary;
+
+        showStatus(
+          "Summary rewritten using AI. Please review before sharing with families.",
+          "ok"
+        );
+      } catch (e) {
+        console.error("LLM rewrite error:", e);
+        showStatus(
+          "Unexpected error while rewriting summary. See console/server logs.",
+          "err"
+        );
+      } finally {
+        llmSummaryBtn.disabled = false;
+        llmSummaryBtn.textContent = oldLabel;
+      }
     });
 
     // Auto-load

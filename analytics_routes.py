@@ -25,6 +25,10 @@ from typing import Dict, Any, Optional, Tuple, List
 from flask import Blueprint, jsonify, render_template, current_app, request
 
 import difflib
+from google.generativeai import GenerativeModel
+import google.generativeai as genai
+import os
+
 
 analytics_bp = Blueprint("analytics", __name__, template_folder="templates")
 
@@ -1617,6 +1621,120 @@ def _process_rows_into_response(
         current_app.logger.warning("Analytics: could not persist derived rows for upload: %s", e)
 
     return {"ok": True, "header": header, "rows": rows_out}
+
+def _rewrite_summary_with_llm(
+    summary_text: str,
+    header: Optional[Dict[str, str]] = None,
+    domain_objects: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Rewrite the summary in a clinician-written style using Gemini.
+    Falls back to the original text if API key missing or any error occurs.
+    """
+    summary_text = (summary_text or "").strip()
+    if not summary_text:
+        return summary_text
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        current_app.logger.warning("LLM rewrite skipped: GEMINI_API_KEY not set.")
+        return summary_text
+
+    # Configure Gemini
+    genai.configure(api_key=api_key)
+    model = GenerativeModel("gemini-1.5-flash")
+
+    header = header or {}
+    child_name = header.get("child_name") or "the child"
+    child_age = header.get("child_age") or "—"
+    parent_name = header.get("parent_respondent") or "the parent"
+    interviewer = header.get("interviewer") or "the clinician"
+
+    # Optional domain context
+    top_domains = []
+    if domain_objects:
+        try:
+            scored = sorted(
+                domain_objects.items(),
+                key=lambda kv: float(kv[1].get("freq_percent", 0.0) or 0.0),
+                reverse=True,
+            )
+            for name, dobj in scored[:4]:
+                top_domains.append(f"- {name}: {dobj.get('quote') or dobj.get('value') or ''}")
+        except Exception:
+            pass
+
+    # Build context
+    context_lines = [
+        f"Child: {child_name}, age: {child_age}.",
+        f"Parent respondent: {parent_name}.",
+        f"Interviewer: {interviewer}.",
+    ]
+    if top_domains:
+        context_lines.append("Key domains mentioned:")
+        context_lines.extend(top_domains)
+
+    context_block = "\n".join(context_lines)
+
+    system_prompt = (
+        "You are a paediatric clinician writing a brief, clear, parent-facing summary. "
+        "Use UK/Irish English, warm professional tone, and avoid jargon. "
+        "Do NOT introduce any new diagnoses or assumptions. "
+        "Stay within 150–220 words. Keep content accurate and empathetic."
+    )
+
+    user_prompt = (
+        f"{system_prompt}\n\n"
+        "Rewrite the following summary into a polished, clinician-written version.\n\n"
+        "=== CONTEXT ===\n"
+        f"{context_block}\n\n"
+        "=== ORIGINAL SUMMARY ===\n"
+        f"{summary_text}\n\n"
+        "=== TASK ===\n"
+        "Rewrite as a single coherent paragraph (or two short paragraphs). "
+        "Do not add new information, diagnoses, or headings."
+    )
+
+    try:
+        response = model.generate_content(user_prompt)
+
+        # Gemini returns .text directly
+        new_text = (response.text or "").strip()
+        if not new_text:
+            current_app.logger.warning("Gemini rewrite returned empty text; falling back.")
+            return summary_text
+
+        return new_text
+
+    except Exception as e:
+        current_app.logger.exception("Gemini rewrite failed: %s", e)
+        return summary_text
+    
+
+@analytics_bp.post("/api/analytics/<session_id>/summary/rewrite")
+def api_rewrite_summary(session_id):
+    """
+    Rewrites the current 'Summary of Key Findings' using the LLM, as if written by a clinician.
+    Expects JSON body with at least { "summary": "..." }.
+    Optionally also accepts header fields (child_name, child_age, etc.).
+    """
+    data = request.get_json(silent=True) or {}
+    summary = (data.get("summary") or "").strip()
+    if not summary:
+        return jsonify({"ok": False, "error": "Missing summary text"}), 400
+
+    header = {
+        "child_name": data.get("child_name"),
+        "child_age": data.get("child_age"),
+        "parent_respondent": data.get("parent_respondent"),
+        "interviewer": data.get("interviewer"),
+    }
+
+    # We *could* also pass domain_objects from disk, but the simple form is:
+    new_summary = _rewrite_summary_with_llm(summary, header=header, domain_objects=None)
+
+    return jsonify({"ok": True, "summary": new_summary})
+
 
 # ----------------------- Upload endpoint -----------------------
 
