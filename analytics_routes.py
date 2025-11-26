@@ -13,7 +13,20 @@ Analytics routes - updated:
 - NEW: Looks up recommendations for each domain based on
   Parent-Friendly Domain + Concern Level from recommendations Excel/CSV
   and injects them into rows["recommendations"] for the UI.
+- NEW: Adds functional impact fields for each item/row:
+    * disrupts_eating_feeding
+    * disrupts_social_activity
+    * disrupts_major_role_obligations
+    * disrupts_education
+    * disrupts_social_obligations
+    * disrupts_sleep
+    * disrupts_physical_activity
+    * disrupts_other_everyday_functioning
+  and LLM helpers to generate y/n values when producing Excel/exports.
+- NEW: Summary template matches Example 1 using:
+    [Strengths], [Concern areas], [Class/year], [Domains of no concerns]
 """
+
 import csv
 import json
 import re
@@ -44,6 +57,56 @@ RECOMMENDATIONS_ROOT.mkdir(parents=True, exist_ok=True)
 _RECS_CACHE: Dict[Tuple[str, str], str] = {}
 _RECS_CACHE_LOADED: bool = False
 
+def _get_gemini_model_name() -> Optional[str]:
+    """
+    Use google.generativeai.list_models() to find a valid text model that supports
+    generateContent. Prefer Gemini text models (pro/flash), fall back to the first
+    text-capable model. Returns the full model name (e.g. 'models/gemini-1.5-pro-latest').
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        current_app.logger.warning("Gemini: GEMINI_API_KEY not set; cannot choose model.")
+        return None
+
+    try:
+        genai.configure(api_key=api_key)
+        models = list(genai.list_models())
+    except Exception as e:
+        current_app.logger.exception("Gemini: list_models failed: %s", e)
+        return None
+
+    if not models:
+        current_app.logger.warning("Gemini: list_models returned no models.")
+        return None
+
+    # Prefer models that support generateContent
+    def supports_generate_content(m) -> bool:
+        methods = getattr(m, "supported_generation_methods", []) or []
+        return any("generatecontent" in x.lower() for x in methods)
+
+    text_models = [m for m in models if supports_generate_content(m)]
+    if not text_models:
+        text_models = models  # fallback: at least pick something
+
+    # Prefer non-embedding Gemini models with "pro" or "flash" in the name
+    preferred = None
+    for m in text_models:
+        name = (getattr(m, "name", "") or "").lower()
+        if "gemini" in name and "embed" not in name:
+            if "pro" in name or "flash" in name:
+                preferred = m
+                break
+
+    if not preferred and text_models:
+        preferred = text_models[0]
+
+    if not preferred:
+        current_app.logger.warning("Gemini: no suitable model found in list_models.")
+        return None
+
+    model_name = getattr(preferred, "name", None)
+    current_app.logger.info("Gemini: using model %s", model_name)
+    return model_name
 
 def _norm_domain_for_lookup(name: str) -> str:
     return (name or "").strip().lower()
@@ -95,6 +158,15 @@ CANONICAL_KEYS = [
     "domain_sleep",
     "domain_social_communication",
     "domain_strengths_interests",
+    # NEW: functional impact flags (per item/row)
+    "disrupts_eating_feeding",
+    "disrupts_social_activity",
+    "disrupts_major_role_obligations",
+    "disrupts_education",
+    "disrupts_social_obligations",
+    "disrupts_sleep",
+    "disrupts_physical_activity",
+    "disrupts_other_everyday_functioning",
 ]
 
 # authoritative list + display names / order
@@ -119,23 +191,149 @@ DOMAIN_CANON = [
 
 # keywords used to auto-assign raw rows into domains — add or tune as needed
 DOMAIN_KEYWORDS = {
-    "Anxiety / Emotion": ["anxi", "worry", "emotion", "mood", "sad", "tear", "fear", "panic", "stress"],
-    "Attention / ADHD": ["attention", "adhd", "hyper", "focus", "distract", "concentrat"],
-    "Autism": ["autis", "asperg", "stereotyp", "sensory", "repetit", "meltdo", "social communication"],
-    "Behaviour": ["behaviour", "behavior", "behav", "tantrum", "aggress", "rule", "routine", "challeng"],
-    "Care History": ["care history", "caregiver", "foster", "placement", "care history", "guardian"],
-    "Developmental History": ["development", "milestone", "delay", "developmental", "walk", "talk", "sit", "crawl"],
-    "Eating": ["eat", "feeding", "food", "weight", "appetite", "swallow", "mealtime"],
-    "Home Life / Routine": ["home", "routine", "bedtime routine", "family", "siblings", "house", "routine"],
-    "Learning / Dyslexia": ["learn", "dyslex", "reading", "spelling", "school", "education", "homework"],
-    "Motor Skills": ["motor", "coordina", "climb", "fine motor", "gross motor", "hand", "balance"],
-    "Other": ["other", "misc", "additional", "note", "info"],
-    "Parent's Goal for this Assessment": ["goal", "aim", "parents goal", "parent's goal", "objective", "what parent wants"],
-    "School Life": ["school", "class", "teacher", "peer", "homework", "attendance"],
-    "Sleep": ["sleep", "bed", "night", "insomnia", "nap", "tired"],
-    "Social / Communication": ["social", "friend", "communic", "talk", "speech", "language", "play", "peer"],
-    "Strengths / Interests": ["strength", "interest", "likes", "hobby", "talent", "strengths"],
+    "Anxiety / Emotion": [
+        "anxi",
+        "worry",
+        "emotion",
+        "mood",
+        "sad",
+        "tear",
+        "fear",
+        "panic",
+        "stress",
+    ],
+    "Attention / ADHD": [
+        "attention",
+        "adhd",
+        "hyper",
+        "focus",
+        "distract",
+        "concentrat",
+    ],
+    "Autism": [
+        "autis",
+        "asperg",
+        "stereotyp",
+        "sensory",
+        "repetit",
+        "meltdo",
+        "social communication",
+    ],
+    "Behaviour": [
+        "behaviour",
+        "behavior",
+        "behav",
+        "tantrum",
+        "aggress",
+        "rule",
+        "routine",
+        "challeng",
+    ],
+    "Care History": [
+        "care history",
+        "caregiver",
+        "foster",
+        "placement",
+        "care history",
+        "guardian",
+    ],
+    "Developmental History": [
+        "development",
+        "milestone",
+        "delay",
+        "developmental",
+        "walk",
+        "talk",
+        "sit",
+        "crawl",
+    ],
+    "Eating": [
+        "eat",
+        "feeding",
+        "food",
+        "weight",
+        "appetite",
+        "swallow",
+        "mealtime",
+    ],
+    "Home Life / Routine": [
+        "home",
+        "routine",
+        "bedtime routine",
+        "family",
+        "siblings",
+        "house",
+        "routine",
+    ],
+    "Learning / Dyslexia": [
+        "learn",
+        "dyslex",
+        "reading",
+        "spelling",
+        "school",
+        "education",
+        "homework",
+    ],
+    "Motor Skills": [
+        "motor",
+        "coordina",
+        "climb",
+        "fine motor",
+        "gross motor",
+        "hand",
+        "balance",
+    ],
+    "Other": [
+        "other",
+        "misc",
+        "additional",
+        "note",
+        "info",
+    ],
+    "Parent's Goal for this Assessment": [
+        "goal",
+        "aim",
+        "parents goal",
+        "parent's goal",
+        "objective",
+        "what parent wants",
+    ],
+    "School Life": [
+        "school",
+        "class",
+        "teacher",
+        "peer",
+        "homework",
+        "attendance",
+    ],
+    "Sleep": [
+        "sleep",
+        "bed",
+        "night",
+        "insomnia",
+        "nap",
+        "tired",
+    ],
+    "Social / Communication": [
+        "social",
+        "friend",
+        "communic",
+        "talk",
+        "speech",
+        "language",
+        "play",
+        "peer",
+    ],
+    "Strengths / Interests": [
+        "strength",
+        "interest",
+        "likes",
+        "hobby",
+        "talent",
+        "strengths",
+    ],
 }
+
 
 def _canonical_domain_from_label(label: str) -> Optional[str]:
     """
@@ -192,6 +390,7 @@ def _canonical_domain_from_label(label: str) -> Optional[str]:
         return best
 
     return None
+
 
 # ---------------------- helpers ----------------------
 
@@ -306,10 +505,12 @@ def _read_xlsx_filled(path: Path) -> List[Dict[str, Any]]:
 
 
 # ----------------------- Mapping helpers -----------------------
+
+
 def _canonical_row_key_from_label(label: str) -> Optional[str]:
     """
     Map human-readable question text from the Excel to canonical keys
-    we can later use for the header + summary.
+    we can later use for the header + summary + functional impact.
     """
     if not label:
         return None
@@ -334,6 +535,10 @@ def _canonical_row_key_from_label(label: str) -> Optional[str]:
     if "how were you referred to our service" in s or "how were you referred to the service" in s:
         return "referral_source"
 
+    # NEW: class / year at school
+    if "class/year" in s or "class / year" in s or "what class" in s or "what year" in s:
+        return "child_class_year"
+
     # Domains we want for summary
     if "what are your main concerns about your child" in s or "main concerns about your child" in s:
         return "domain_parents_goal"
@@ -344,7 +549,33 @@ def _canonical_row_key_from_label(label: str) -> Optional[str]:
     if "has your child undergone any previous assessments" in s or "previous assessments" in s:
         return "domain_care_history"
 
+    # NEW: functional impact fields (per item/row)
+    if "disrupts eating" in s or "disrupts feeding" in s:
+        return "disrupts_eating_feeding"
+
+    if "disrupts social activity" in s:
+        return "disrupts_social_activity"
+
+    if "disrupts fulfillment of major role obligations" in s or "major role obligations" in s:
+        return "disrupts_major_role_obligations"
+
+    if "disrupts education" in s:
+        return "disrupts_education"
+
+    if "disrupts fulfillment of social obligations" in s or "social obligations" in s:
+        return "disrupts_social_obligations"
+
+    if "disrupts sleep" in s:
+        return "disrupts_sleep"
+
+    if "disrupts physical activity" in s:
+        return "disrupts_physical_activity"
+
+    if "disrupts other everyday functioning" in s or "other everyday functioning" in s:
+        return "disrupts_other_everyday_functioning"
+
     return None
+
 
 def _map_row_list_to_dict(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
@@ -973,6 +1204,7 @@ def _aggregate_domain_weights_from_rows(rows_list: List[Dict[str, Any]]) -> Dict
 
     return results
 
+
 def _percent_to_level(percent: float) -> str:
     if percent is None:
         return "no"
@@ -1199,11 +1431,15 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
         "interviewer": "—",
         "referral_source": "—",
         "report_title": "Parent Telephone Interview Summary",
+        # NEW
+        "child_class_year": "—",
     }
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
             header.update({k: v for k, v in data.items() if v is not None})
+            # ensure child_class_year exists even if not in file
+            header.setdefault("child_class_year", "—")
             return header
         except Exception:
             current_app.logger.warning(
@@ -1212,6 +1448,7 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
     extracted = _extract_header_from_transcript(session_id)
     if extracted:
         header.update({k: v for k, v in extracted.items() if v})
+        header.setdefault("child_class_year", "—")
         return header
     session_dir = DATA_ROOT / session_id
     if session_dir.exists():
@@ -1220,6 +1457,7 @@ def load_header_metadata(session_id: str) -> Dict[str, str]:
             header["date_of_interview"] = datetime.utcfromtimestamp(ts).strftime("%d %b %Y")
         except Exception:
             pass
+    header.setdefault("child_class_year", "—")
     return header
 
 
@@ -1233,6 +1471,7 @@ def _extract_basic_info_from_rows_list(rows_list: List[Dict[str, Any]]) -> Dict[
       - What is your full name?               -> parent_respondent
       - Who is conducting today's interview?  -> interviewer
       - How were you referred to our service? -> referral_source
+      - What class/year is your child in?     -> child_class_year
     """
     info = {
         "child_name": None,
@@ -1240,6 +1479,7 @@ def _extract_basic_info_from_rows_list(rows_list: List[Dict[str, Any]]) -> Dict[
         "parent_respondent": None,
         "interviewer": None,
         "referral_source": None,
+        "child_class_year": None,
     }
 
     def get_any(r: Dict[str, Any], *names):
@@ -1286,8 +1526,12 @@ def _extract_basic_info_from_rows_list(rows_list: List[Dict[str, Any]]) -> Dict[
         elif "how were you referred to our service" in s or "referred to our service" in s:
             if not info["referral_source"]:
                 info["referral_source"] = str(answer).strip()
+        elif "class/year" in s or "class / year" in s or "what class" in s or "what year" in s:
+            if not info["child_class_year"]:
+                info["child_class_year"] = str(answer).strip()
 
     return info
+
 
 def _process_rows_into_response(
     mapped_rows: Dict[str, Dict[str, Any]],
@@ -1300,10 +1544,8 @@ def _process_rows_into_response(
 
     NEW:
     - Enrich header from Excel rows where possible (child_name, parent, etc.).
-    - Auto-generate a natural-language summary_overview string using:
-        * header fields (child, age, parent, interviewer, date, referral source)
-        * Parent's Goal for this Assessment domain
-        * Strengths / Interests domain
+    - Auto-generate a natural-language summary_overview string using Example 1 template:
+        [Strengths], [Concern areas], [Class/year], [Domains of no concerns]
     """
     # ---------------- Normalise canonical rows ----------------
     normalized: Dict[str, Dict[str, Any]] = {}
@@ -1479,7 +1721,6 @@ def _process_rows_into_response(
             "quote_no_count": info.get("quote_no_count", 0),
         }
 
-
     rows_out["domain_objects"] = domain_objects
     rows_out["domain_scores"] = domain_scores
 
@@ -1496,6 +1737,7 @@ def _process_rows_into_response(
             "interviewer": "—",
             "referral_source": "—",
             "report_title": "Parent Telephone Interview Summary",
+            "child_class_year": "—",
         }
 
     # Ensure required keys exist
@@ -1509,10 +1751,9 @@ def _process_rows_into_response(
     header.setdefault("interviewer", "—")
     header.setdefault("referral_source", "—")
     header.setdefault("report_title", "Parent Telephone Interview Summary")
+    header.setdefault("child_class_year", "—")
 
     # 2) NEW: backfill ONLY from the structured Q&A rows
-    #    (What is your child's full name?, How old is your child?, etc.)
-    #    We do NOT use domain rows or quotes here.
     try:
         basic = _extract_basic_info_from_rows_list(rows_list)
         for hk, val in basic.items():
@@ -1524,8 +1765,7 @@ def _process_rows_into_response(
     except Exception as e:
         current_app.logger.warning("Header backfill from rows_list failed: %s", e)
 
-
-    # ---------------- Build natural-language summary ----------------
+    # ---------------- Build natural-language summary (Example 1 template) ----------------
     def _get_domain_text(domain_name: str) -> str:
         # 1. Try domain_objects (quote > value)
         dobj = domain_objects.get(domain_name, {}) or {}
@@ -1545,29 +1785,46 @@ def _process_rows_into_response(
         cleaned = _strip_inferred_text(txt)
         return cleaned or ""
 
-    child_name = header.get("child_name") or "—"
-    child_age = header.get("child_age") or "—"
-    parent_name = header.get("parent_respondent") or "—"
-    interviewer = header.get("interviewer") or "—"
-    date_int = header.get("date_of_interview") or "—"
-    referral_source = header.get("referral_source") or "—"
+    child_name = header.get("child_name") or "your child"
+    child_age = header.get("child_age") or "of school age"
+    class_year = header.get("child_class_year") or "their current class"
 
-    assessment_goals = _get_domain_text("Parent's Goal for this Assessment")
-    strengths = _get_domain_text("Strengths / Interests")
+    # [Strengths]
+    strengths_text = _get_domain_text("Strengths / Interests")
 
-    parts: List[str] = []
-    parts.append(f"Child name is {child_name}, aged {child_age}.")
-    parts.append(
-        f"The parent respondent is {parent_name}, and the interview was conducted by {interviewer} on {date_int}."
-    )
-    parts.append(f"The referral source for this assessment is {referral_source}.")
+    # [Concern areas] – domains raised (high / some) using frequency traffic
+    concern_domains = traffic_freq_hi + traffic_freq_some
+    if concern_domains:
+        concern_areas = ", ".join(concern_domains)
+    else:
+        concern_areas = "the areas discussed"
 
-    if assessment_goals:
-        parts.append(f"The parent’s main goals for the assessment are: {assessment_goals}.")
-    if strengths:
-        parts.append(f"The child’s strengths include: {strengths}.")
+    # [Domains of no concerns] – domains with 'no concern'
+    if traffic_freq_no:
+        domains_no_concern = ", ".join(traffic_freq_no)
+    else:
+        domains_no_concern = "no specific domains"
 
-    summary_text = " ".join(p.strip() for p in parts if p and p.strip())
+    if strengths_text:
+        strengths_clause = (
+            f"You described many lovely strengths, including {strengths_text}, and it’s clear "
+            f"how bright and engaging {child_name} is."
+        )
+    else:
+        strengths_clause = (
+            f"You described many lovely strengths, and it’s clear how bright and engaging {child_name} is."
+        )
+
+    summary_sentences = [
+        f"Thank you for sharing your thoughts about {child_name}. {child_name} is {child_age} and lives at home with you and your family.",
+        strengths_clause,
+        f"You also mentioned some worries in the areas of {concern_areas}, and understanding these helps us think about how best to support {child_name}.",
+        f"It’s very positive that you feel well connected as a family and that {child_name} is surrounded by such strong support.",
+        f"{child_name} is currently in {class_year} at school, and you noted no concerns in {domains_no_concern}, which is reassuring.",
+        "The recommendations below may offer helpful ideas for the next steps.",
+    ]
+
+    summary_text = " ".join(s.strip() for s in summary_sentences if s and s.strip())
 
     rows_out["summary_overview"] = {
         "value": summary_text if summary_text else None,
@@ -1622,6 +1879,7 @@ def _process_rows_into_response(
 
     return {"ok": True, "header": header, "rows": rows_out}
 
+
 def _rewrite_summary_with_llm(
     summary_text: str,
     header: Optional[Dict[str, str]] = None,
@@ -1635,14 +1893,17 @@ def _rewrite_summary_with_llm(
     if not summary_text:
         return summary_text
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        current_app.logger.warning("LLM rewrite skipped: GEMINI_API_KEY not set.")
+    # Choose a working Gemini model dynamically
+    model_name = _get_gemini_model_name()
+    if not model_name:
+        # Already logged; just fall back
         return summary_text
 
-    # Configure Gemini
-    genai.configure(api_key=api_key)
-    model = GenerativeModel("gemini-1.5-flash")
+    try:
+        model = GenerativeModel(model_name)
+    except Exception as e:
+        current_app.logger.exception("Gemini: failed to initialise GenerativeModel(%s): %s", model_name, e)
+        return summary_text
 
     header = header or {}
     child_name = header.get("child_name") or "the child"
@@ -1697,19 +1958,177 @@ def _rewrite_summary_with_llm(
 
     try:
         response = model.generate_content(user_prompt)
-
-        # Gemini returns .text directly
         new_text = (response.text or "").strip()
         if not new_text:
-            current_app.logger.warning("Gemini rewrite returned empty text; falling back.")
+            current_app.logger.warning("Gemini rewrite returned empty text; falling back to original.")
             return summary_text
-
         return new_text
-
     except Exception as e:
         current_app.logger.exception("Gemini rewrite failed: %s", e)
         return summary_text
-    
+
+
+# ----------------------- NEW: LLM helpers for disruption flags -----------------------
+
+
+def _llm_annotate_disruptions(item_text: str) -> Dict[str, str]:
+    """
+    Given the free-text description of a problem/behaviour (e.g. an item quote),
+    return y/n flags for functional impact dimensions:
+
+        - disrupts_eating_feeding
+        - disrupts_social_activity
+        - disrupts_major_role_obligations
+        - disrupts_education
+        - disrupts_social_obligations
+        - disrupts_sleep
+        - disrupts_physical_activity
+        - disrupts_other_everyday_functioning
+
+    Uses Gemini. If the API key is missing or anything fails, returns all 'n'.
+    """
+    # default: assume no disruption
+    default_flags = {
+        "disrupts_eating_feeding": "n",
+        "disrupts_social_activity": "n",
+        "disrupts_major_role_obligations": "n",
+        "disrupts_education": "n",
+        "disrupts_social_obligations": "n",
+        "disrupts_sleep": "n",
+        "disrupts_physical_activity": "n",
+        "disrupts_other_everyday_functioning": "n",
+    }
+
+    item_text = (item_text or "").strip()
+    if not item_text:
+        return default_flags
+
+    # 🔹 Use dynamic model selection (from the helper we added earlier)
+    model_name = _get_gemini_model_name()
+    if not model_name:
+        return default_flags
+
+    try:
+        model = GenerativeModel(model_name)
+    except Exception as e:
+        current_app.logger.exception("Gemini: failed to initialise GenerativeModel(%s): %s", model_name, e)
+        return default_flags
+
+    # 🔹 LLM input EXACTLY as you specified
+    user_prompt = (
+        "Every item can have:\n"
+        "- Disrupts eating/feeding (y/n)\n"
+        "- Disrupts social activity (y/n)\n"
+        "- Disrupts fulfillment of major role obligations "
+        "(forgetting homework, being respectful to parents and teachers, "
+        "preparing food for siblings, etc.) (y/n)\n"
+        "- Disrupts education (y/n)\n"
+        "- Disrupts fulfillment of social obligations (y/n)\n"
+        "- Disrupts sleep (y/n)\n"
+        "- Disrupts physical activity (y/n)\n"
+        "- Disrupts other everyday functioning "
+        "(using public transport, toileting, hygiene etc.) (y/n)\n\n"
+        "Given the behaviour / difficulty below, decide if it clearly disrupts each area.\n"
+        "If the text is unclear or the area is not mentioned, answer 'n' for that area.\n\n"
+        "Text to analyse:\n"
+        f"\"\"\"{item_text}\"\"\"\n\n"
+        "Return STRICTLY valid JSON in this shape (no extra text):\n"
+        "{\n"
+        '  \"disrupts_eating_feeding\": \"y|n\",\n'
+        '  \"disrupts_social_activity\": \"y|n\",\n'
+        '  \"disrupts_major_role_obligations\": \"y|n\",\n'
+        '  \"disrupts_education\": \"y|n\",\n'
+        '  \"disrupts_social_obligations\": \"y|n\",\n'
+        '  \"disrupts_sleep\": \"y|n\",\n'
+        '  \"disrupts_physical_activity\": \"y|n\",\n'
+        '  \"disrupts_other_everyday_functioning\": \"y|n\"\n'
+        "}\n"
+    )
+
+    try:
+        resp = model.generate_content(user_prompt)
+        raw = (resp.text or "").strip()
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            # Sometimes models wrap JSON in markdown fences – try to strip them
+            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if not m:
+                current_app.logger.warning("Failed to parse LLM disruption JSON: %s", raw[:200])
+                return default_flags
+            parsed = json.loads(m.group(0))
+
+        out = dict(default_flags)
+        for k in default_flags.keys():
+            val = str(parsed.get(k, "n")).strip().lower()
+            out[k] = "y" if val in ("y", "yes", "true", "1") else "n"
+
+        return out
+
+    except Exception as e:
+        current_app.logger.exception("Gemini disruption annotation failed: %s", e)
+        return default_flags
+
+def annotate_row_with_disruptions_for_excel(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convenience helper for the Excel/CSV export pipeline.
+
+    - Takes a row dict (e.g. with 'value' and/or 'quote').
+    - Builds a text snippet.
+    - Calls the LLM to classify functional disruption.
+    - Writes BOTH:
+        * internal keys (disrupts_...),
+        * and human-friendly CSV/Excel column headers:
+
+            - eating/feeding (y/n)
+            - social activity (y/n)
+            - fulfillment of major role obligations (y/n)
+            - education (y/n)
+            - fulfillment of social obligations (y/n)
+            - sleep (y/n)
+            - physical activity (y/n)
+            - other everyday functioning (y/n)
+
+      into the row dict, so csv.DictWriter / Excel export can just dump the row.
+    """
+    if not isinstance(row, dict):
+        row = {}
+
+    # Use quote first (richer description), then value/question
+    text_pieces = []
+    if row.get("quote"):
+        text_pieces.append(str(row["quote"]))
+    if row.get("value"):
+        text_pieces.append(str(row["value"]))
+    # Optional: include any 'question' or 'label' to give more context
+    for k in ("row_label", "label", "question", "possible parent-friendly question"):
+        if k in row and row[k]:
+            text_pieces.append(str(row[k]))
+
+    combined_text = " ".join(text_pieces).strip()
+    flags = _llm_annotate_disruptions(combined_text)
+
+    # Attach canonical internal keys (if you want to use them programmatically)
+    for k, v in flags.items():
+        row[k] = v
+
+    # Attach HUMAN-FRIENDLY COLUMN NAMES for CSV/Excel
+    header_map = {
+        "eating/feeding (y/n)": "disrupts_eating_feeding",
+        "social activity (y/n)": "disrupts_social_activity",
+        "fulfillment of major role obligations (y/n)": "disrupts_major_role_obligations",
+        "education (y/n)": "disrupts_education",
+        "fulfillment of social obligations (y/n)": "disrupts_social_obligations",
+        "sleep (y/n)": "disrupts_sleep",
+        "physical activity (y/n)": "disrupts_physical_activity",
+        "other everyday functioning (y/n)": "disrupts_other_everyday_functioning",
+    }
+
+    for col_name, flag_key in header_map.items():
+        row[col_name] = flags.get(flag_key, "n")
+
+    return flags
 
 @analytics_bp.post("/api/analytics/<session_id>/summary/rewrite")
 def api_rewrite_summary(session_id):
@@ -1791,6 +2210,7 @@ def api_upload_and_generate():
         "interviewer": "—",
         "referral_source": Path(filename).name,
         "report_title": "Uploaded Data Analytics",
+        "child_class_year": "—",
     }
 
     try:
