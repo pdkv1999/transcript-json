@@ -2,11 +2,196 @@
 Main extraction logic (local heuristics + LLM-assisted flow).
 """
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 import re
+import os
+
 import pandas as pd
+import json
+import google.generativeai as genai
+from google.generativeai import GenerativeModel
+
 from io_helpers import read_schema, write_output
-from matching import split_sentences, looks_like_response, detect_frequency_label_from_text, compute_response_code, GENERIC_KWS
+from matching import (
+    split_sentences,
+    looks_like_response,
+    detect_frequency_label_from_text,
+    compute_response_code,
+    GENERIC_KWS,
+)
+
+# LLM-assisted path (optional Gemini); reuses compute_response_code
+from llm_helper import (
+    call_gemini_functional,
+    GEMINI_MODEL_DEFAULT,
+    gemini_client,
+    _gemini_api_key_valid,
+)
+
+# ---------------------------------------------------------------------------
+# NEW: LLM helpers for disruption flags
+# ---------------------------------------------------------------------------
+
+DISRUPTION_INTERNAL_KEYS = [
+    "disrupts_eating_feeding",
+    "disrupts_social_activity",
+    "disrupts_major_role_obligations",
+    "disrupts_education",
+    "disrupts_social_obligations",
+    "disrupts_sleep",
+    "disrupts_physical_activity",
+    "disrupts_other_everyday_functioning",
+]
+
+DISRUPTION_EXPORT_COLS = {
+    "eating/feeding (y/n)": "disrupts_eating_feeding",
+    "social activity (y/n)": "disrupts_social_activity",
+    "fulfillment of major role obligations (y/n)": "disrupts_major_role_obligations",
+    "education (y/n)": "disrupts_education",
+    "fulfillment of social obligations (y/n)": "disrupts_social_obligations",
+    "sleep (y/n)": "disrupts_sleep",
+    "physical activity (y/n)": "disrupts_physical_activity",
+    "other everyday functioning (y/n)": "disrupts_other_everyday_functioning",
+}
+
+
+def _llm_annotate_disruptions(item_text: str) -> Dict[str, str]:
+    """
+    Given the free-text description of a problem/behaviour (e.g. item quote + label),
+    return y/n flags for functional impact dimensions:
+
+        - disrupts_eating_feeding
+        - disrupts_social_activity
+        - disrupts_major_role_obligations
+        - disrupts_education
+        - disrupts_social_obligations
+        - disrupts_sleep
+        - disrupts_physical_activity
+        - disrupts_other_everyday_functioning
+
+    Uses Gemini. If API key missing or anything fails, returns all 'n'.
+    """
+    default_flags = {
+        "disrupts_eating_feeding": "n",
+        "disrupts_social_activity": "n",
+        "disrupts_major_role_obligations": "n",
+        "disrupts_education": "n",
+        "disrupts_social_obligations": "n",
+        "disrupts_sleep": "n",
+        "disrupts_physical_activity": "n",
+        "disrupts_other_everyday_functioning": "n",
+    }
+
+    item_text = (item_text or "").strip()
+    if not item_text:
+        return default_flags
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return default_flags
+
+    try:
+        genai.configure(api_key=api_key)
+    except Exception:
+        return default_flags
+
+    model_name = GEMINI_MODEL_DEFAULT or "models/gemini-1.5-pro-latest"
+
+    try:
+        model = GenerativeModel(model_name)
+    except Exception:
+        return default_flags
+
+    user_prompt = (
+        "Every item can have:\n"
+        "- Disrupts eating/feeding (y/n)\n"
+        "- Disrupts social activity (y/n)\n"
+        "- Disrupts fulfillment of major role obligations "
+        "(forgetting homework, being respectful to parents and teachers, "
+        "preparing food for siblings, etc.) (y/n)\n"
+        "- Disrupts education (y/n)\n"
+        "- Disrupts fulfillment of social obligations (y/n)\n"
+        "- Disrupts sleep (y/n)\n"
+        "- Disrupts physical activity (y/n)\n"
+        "- Disrupts other everyday functioning "
+        "(using public transport, toileting, hygiene etc.) (y/n)\n\n"
+        "Given the behaviour / difficulty below, decide if it clearly disrupts each area.\n"
+        "If the text is unclear or the area is not mentioned, answer 'n' for that area.\n\n"
+        "Text to analyse:\n"
+        f"\"\"\"{item_text}\"\"\"\n\n"
+        "Return STRICTLY valid JSON in this shape (no extra text):\n"
+        "{\n"
+        '  \"disrupts_eating_feeding\": \"y|n\",\n'
+        '  \"disrupts_social_activity\": \"y|n\",\n'
+        '  \"disrupts_major_role_obligations\": \"y|n\",\n'
+        '  \"disrupts_education\": \"y|n\",\n'
+        '  \"disrupts_social_obligations\": \"y|n\",\n'
+        '  \"disrupts_sleep\": \"y|n\",\n'
+        '  \"disrupts_physical_activity\": \"y|n\",\n'
+        '  \"disrupts_other_everyday_functioning\": \"y|n\"\n'
+        "}\n"
+    )
+
+    try:
+        resp = model.generate_content(user_prompt)
+        raw = (resp.text or "").strip()
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if not m:
+                return default_flags
+            parsed = json.loads(m.group(0))
+
+        out = dict(default_flags)
+        for k in default_flags.keys():
+            val = str(parsed.get(k, "n")).strip().lower()
+            out[k] = "y" if val in ("y", "yes", "true", "1") else "n"
+
+        return out
+    except Exception:
+        return default_flags
+
+
+def annotate_row_disruptions_for_df(df: pd.DataFrame, idx: int) -> None:
+    """
+    Fill disruption flags for a single DataFrame row (in-place).
+
+    - Builds text from quote + value + question label.
+    - Calls LLM to get y/n flags.
+    - Writes BOTH:
+        * internal keys: disrupts_...
+        * export columns: 'eating/feeding (y/n)', etc.
+    """
+    row = df.loc[idx]
+
+    text_pieces = []
+    for key_guess in ("quote", "value", "question", "row_label", "possible parent-friendly question"):
+        if key_guess in df.columns:
+            val = row.get(key_guess)
+            if isinstance(val, str) and val.strip():
+                text_pieces.append(val.strip())
+
+    combined_text = " ".join(text_pieces).strip()
+    flags = _llm_annotate_disruptions(combined_text)
+
+    # Internal keys
+    for k in DISRUPTION_INTERNAL_KEYS:
+        if k not in df.columns:
+            df[k] = None
+        df.at[idx, k] = flags.get(k, "n")
+
+    # Human-facing export columns
+    for col_name, flag_key in DISRUPTION_EXPORT_COLS.items():
+        if col_name not in df.columns:
+            df[col_name] = None
+        df.at[idx, col_name] = flags.get(flag_key, "n")
+
+
+# ---------------------------------------------------------------------------
+# Existing helper functions
+# ---------------------------------------------------------------------------
 
 def detect_question_column(df_or_path) -> str:
     if not isinstance(df_or_path, pd.DataFrame):
@@ -19,7 +204,10 @@ def detect_question_column(df_or_path) -> str:
     for c in df.columns:
         if re.search(r"\btier\s*5\b", str(c), flags=re.IGNORECASE):
             return c
-    keyword_re = re.compile(r"question|prompt|field|name|identif|identificat|date|gender|ethnic|birth|interview", flags=re.IGNORECASE)
+    keyword_re = re.compile(
+        r"question|prompt|field|name|identif|identificat|date|gender|ethnic|birth|interview",
+        flags=re.IGNORECASE,
+    )
     for c in df.columns:
         if keyword_re.search(str(c)):
             return c
@@ -32,6 +220,7 @@ def detect_question_column(df_or_path) -> str:
             return c
     return df.columns[0]
 
+
 def detect_tier6_column(df: pd.DataFrame) -> Optional[str]:
     for c in df.columns:
         if "tier" in str(c).lower() and "6" in str(c).lower():
@@ -42,27 +231,59 @@ def detect_tier6_column(df: pd.DataFrame) -> Optional[str]:
             return c
     return None
 
+
 def tier6_looks_boolean(t6_text: str) -> bool:
     if not t6_text or not isinstance(t6_text, str):
         return False
     s = t6_text.lower()
-    if any(k in s for k in ("bool", "boolean", "yes/no", "true/false", "checkbox", "checked", "tick", "yes no")):
+    if any(
+        k in s
+        for k in (
+            "bool",
+            "boolean",
+            "yes/no",
+            "true/false",
+            "checkbox",
+            "checked",
+            "tick",
+            "yes no",
+        )
+    ):
         return True
     if re.fullmatch(r"(yes\/no|true\/false|truefalse|yesno)", re.sub(r"\s+", "", s)):
         return True
     return False
 
+
 def tier6_looks_numeric(t6_text: str) -> bool:
     if not t6_text or not isinstance(t6_text, str):
         return False
     s = t6_text.lower()
-    if any(k in s for k in ("number", "numeric", " integer", "int", "float", "age", "years", "yrs", "kg", "%", "percent")):
+    if any(
+        k in s
+        for k in (
+            "number",
+            "numeric",
+            " integer",
+            "int",
+            "float",
+            "age",
+            "years",
+            "yrs",
+            "kg",
+            "%",
+            "percent",
+        )
+    ):
         return True
     if re.search(r"\d", s):
         return True
     return False
 
+
 NUM_RE = re.compile(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?")
+
+
 def extract_first_number(text: str):
     if not text:
         return None
@@ -71,7 +292,10 @@ def extract_first_number(text: str):
         return m.group(0)
     return None
 
-def derive_value_from_tier6_and_text(t6_text: str, field_text: str, found_quote: Optional[str]):
+
+def derive_value_from_tier6_and_text(
+    t6_text: str, field_text: str, found_quote: Optional[str]
+):
     t6 = str(t6_text or "").strip()
     field = str(field_text or "").strip()
     q = found_quote or ""
@@ -82,7 +306,9 @@ def derive_value_from_tier6_and_text(t6_text: str, field_text: str, found_quote:
             low = q.lower()
             if re.search(r"\b(no|not|never|denies)\b", low):
                 return "no", q
-            if re.search(r"\b(yes|does|is|are|has|have|often|sometimes|rarely|always)\b", low):
+            if re.search(
+                r"\b(yes|does|is|are|has|have|often|sometimes|rarely|always)\b", low
+            ):
                 return "yes", q
         return "", q
     if tier6_looks_numeric(t6):
@@ -98,22 +324,48 @@ def derive_value_from_tier6_and_text(t6_text: str, field_text: str, found_quote:
         return (short_q, short_q)
     return ("", "")
 
-def fill_schema_locally(schema_path: Path, transcript_text: str) -> Tuple[pd.DataFrame, Path]:
+
+def fill_schema_locally(
+    schema_path: Path, transcript_text: str
+) -> Tuple[pd.DataFrame, Path]:
     df = read_schema(schema_path)
     qcol = detect_question_column(df)
     t6col = detect_tier6_column(df)
+
+    # Ensure base columns
     if "value" not in [str(c).strip().lower() for c in df.columns]:
         df["value"] = None
-    value_col = next((c for c in df.columns if str(c).strip().lower() == "value"), "value")
+    value_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "value"), "value"
+    )
+
     if "quote" not in [str(c).strip().lower() for c in df.columns]:
         df["quote"] = None
-    quote_col = next((c for c in df.columns if str(c).strip().lower() == "quote"), "quote")
+    quote_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "quote"), "quote"
+    )
+
     if "response_code" not in [str(c).strip().lower() for c in df.columns]:
         df["response_code"] = None
-    response_col = next((c for c in df.columns if str(c).strip().lower() == "response_code"), "response_code")
+    response_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "response_code"),
+        "response_code",
+    )
+
     if "frequency_code" not in [str(c).strip().lower() for c in df.columns]:
         df["frequency_code"] = None
-    freq_col = next((c for c in df.columns if str(c).strip().lower() == "frequency_code"), "frequency_code")
+    freq_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "frequency_code"),
+        "frequency_code",
+    )
+
+    # Ensure disruption columns exist (internal + export)
+    for k in DISRUPTION_INTERNAL_KEYS:
+        if k not in df.columns:
+            df[k] = None
+    for col_name in DISRUPTION_EXPORT_COLS.keys():
+        if col_name not in df.columns:
+            df[col_name] = None
 
     sentences = split_sentences(transcript_text)
     lower_full = transcript_text.lower()
@@ -134,7 +386,16 @@ def fill_schema_locally(schema_path: Path, transcript_text: str) -> Tuple[pd.Dat
         df.at[i, freq_col] = ""
 
         if not field_text:
-            debug_rows.append({"question": "", "tier6": t6_text, "found_quote": "", "value": "", "response_code": "", "frequency_code": ""})
+            debug_rows.append(
+                {
+                    "question": "",
+                    "tier6": t6_text,
+                    "found_quote": "",
+                    "value": "",
+                    "response_code": "",
+                    "frequency_code": "",
+                }
+            )
             continue
 
         found_quote = None
@@ -164,7 +425,11 @@ def fill_schema_locally(schema_path: Path, transcript_text: str) -> Tuple[pd.Dat
                     break
 
         if not found_quote:
-            tokens_for_ngrams = [t.lower() for t in re.split(r"[^A-Za-z0-9]+", field_text) if len(t) >= 2]
+            tokens_for_ngrams = [
+                t.lower()
+                for t in re.split(r"[^A-Za-z0-9]+", field_text)
+                if len(t) >= 2
+            ]
             for ngram in ngrams_from_tokens(tokens_for_ngrams, min_n=2, max_n=6):
                 if len(ngram) < 4:
                     continue
@@ -197,22 +462,35 @@ def fill_schema_locally(schema_path: Path, transcript_text: str) -> Tuple[pd.Dat
 
         if not found_quote:
             for s in sentences:
-                if looks_like_response(s) and any(k in s.lower() for k in GENERIC_KWS):
+                if looks_like_response(s) and any(
+                    k in s.lower() for k in GENERIC_KWS
+                ):
                     found_quote = s
                     break
 
-        value, evidence = derive_value_from_tier6_and_text(t6_text, field_text, found_quote)
+        value, evidence = derive_value_from_tier6_and_text(
+            t6_text, field_text, found_quote
+        )
         if not evidence and found_quote:
-            evidence = found_quote if len(found_quote) <= 500 else found_quote[:500] + "..."
+            evidence = (
+                found_quote
+                if len(found_quote) <= 500
+                else found_quote[:500] + "..."
+            )
 
-        # New: smarter response_code
+        # Response + frequency
         response_code = compute_response_code(value, evidence, field_text)
-        frequency_code = detect_frequency_label_from_text(evidence or value, field_text)
+        frequency_code = detect_frequency_label_from_text(
+            evidence or value, field_text
+        )
 
         df.at[i, value_col] = value or ""
         df.at[i, quote_col] = evidence or ""
         df.at[i, response_col] = response_code
         df.at[i, freq_col] = frequency_code
+
+        # NEW: disruption flags via LLM
+        annotate_row_disruptions_for_df(df, i)
 
         debug_rows.append(
             {
@@ -227,41 +505,66 @@ def fill_schema_locally(schema_path: Path, transcript_text: str) -> Tuple[pd.Dat
 
     try:
         dbg_df = pd.DataFrame(debug_rows)
-        (Path("data") / f"{schema_path.stem}_debug_matches.csv").write_text(dbg_df.to_csv(index=False), encoding="utf-8")
+        (
+            Path("data") / f"{schema_path.stem}_debug_matches.csv"
+        ).write_text(dbg_df.to_csv(index=False), encoding="utf-8")
     except Exception:
         pass
 
     out_path = write_output(df, schema_path)
     try:
-        (Path("data") / "debug_transcript.txt").write_text(transcript_text[:300000], encoding="utf-8")
-        (Path("data") / "debug_sentences.txt").write_text("\n---\n".join(split_sentences(transcript_text)[:2000]), encoding="utf-8")
+        (Path("data") / "debug_transcript.txt").write_text(
+            transcript_text[:300000], encoding="utf-8"
+        )
+        (Path("data") / "debug_sentences.txt").write_text(
+            "\n---\n".join(split_sentences(transcript_text)[:2000]),
+            encoding="utf-8",
+        )
     except Exception:
         pass
     return df, out_path
 
-# LLM-assisted path (optional Gemini); reuses compute_response_code
-from llm_helper import call_gemini_functional, GEMINI_MODEL_DEFAULT, gemini_client, _gemini_api_key_valid
 
-def fill_schema_with_gemini_then_local(schema_path: Path, transcript_text: str, model: str = GEMINI_MODEL_DEFAULT):
+def fill_schema_with_gemini_then_local(
+    schema_path: Path, transcript_text: str, model: str = GEMINI_MODEL_DEFAULT
+):
     df = read_schema(schema_path)
     qcol = detect_question_column(df)
     t6col = detect_tier6_column(df)
 
     if "value" not in [str(c).strip().lower() for c in df.columns]:
         df["value"] = None
-    value_col = next((c for c in df.columns if str(c).strip().lower() == "value"), "value")
+    value_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "value"), "value"
+    )
 
     if "quote" not in [str(c).strip().lower() for c in df.columns]:
         df["quote"] = None
-    quote_col = next((c for c in df.columns if str(c).strip().lower() == "quote"), "quote")
+    quote_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "quote"), "quote"
+    )
 
     if "response_code" not in [str(c).strip().lower() for c in df.columns]:
         df["response_code"] = None
-    response_col = next((c for c in df.columns if str(c).strip().lower() == "response_code"), "response_code")
+    response_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "response_code"),
+        "response_code",
+    )
 
     if "frequency_code" not in [str(c).strip().lower() for c in df.columns]:
         df["frequency_code"] = None
-    freq_col = next((c for c in df.columns if str(c).strip().lower() == "frequency_code"), "frequency_code")
+    freq_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "frequency_code"),
+        "frequency_code",
+    )
+
+    # Ensure disruption columns exist
+    for k in DISRUPTION_INTERNAL_KEYS:
+        if k not in df.columns:
+            df[k] = None
+    for col_name in DISRUPTION_EXPORT_COLS.keys():
+        if col_name not in df.columns:
+            df[col_name] = None
 
     rows_payload = []
     for i, row in df.iterrows():
@@ -269,20 +572,23 @@ def fill_schema_with_gemini_then_local(schema_path: Path, transcript_text: str, 
         tier6_text = str(row.get(t6col, "") or "").strip() if t6col else ""
         full_row = " | ".join([str(row.get(c, "") or "") for c in df.columns])
         row_key = f"r{i}"
-        rows_payload.append({
-            "row_index": i,
-            "row_key": row_key,
-            "row_label": row_label if row_label else f"row_{i}",
-            "tier6": tier6_text,
-            "full_row": full_row,
-            "schema_name": schema_path.stem
-        })
+        rows_payload.append(
+            {
+                "row_index": i,
+                "row_key": row_key,
+                "row_label": row_label if row_label else f"row_{i}",
+                "tier6": tier6_text,
+                "full_row": full_row,
+                "schema_name": schema_path.stem,
+            }
+        )
 
     parsed = None
     if gemini_client is not None and _gemini_api_key_valid:
         parsed = call_gemini_functional(rows_payload, transcript_text, model=model)
 
     if not parsed or not isinstance(parsed, dict):
+        # Fall back to local (which also fills disruptions)
         return fill_schema_locally(schema_path, transcript_text)
 
     for item in rows_payload:
@@ -292,7 +598,6 @@ def fill_schema_with_gemini_then_local(schema_path: Path, transcript_text: str, 
         if isinstance(res, dict):
             val = res.get("value")
             q = res.get("quote") or ""
-            t6_text = item["tier6"] or ""
 
             if isinstance(val, (int, float)):
                 df.at[i, value_col] = str(val)
@@ -303,30 +608,58 @@ def fill_schema_with_gemini_then_local(schema_path: Path, transcript_text: str, 
 
             df.at[i, quote_col] = q or ""
 
-            # smarter response code
-            response_code = compute_response_code(df.at[i, value_col], q, item["row_label"])
-            frequency_code = detect_frequency_label_from_text(q or df.at[i, value_col], item["row_label"])
+            # response / frequency from value+quote
+            response_code = compute_response_code(
+                df.at[i, value_col], q, item["row_label"]
+            )
+            frequency_code = detect_frequency_label_from_text(
+                q or df.at[i, value_col], item["row_label"]
+            )
             df.at[i, response_col] = response_code
             df.at[i, freq_col] = frequency_code
+
+            # NEW: disruption flags via LLM
+            annotate_row_disruptions_for_df(df, i)
         else:
             df.at[i, value_col] = None
             df.at[i, quote_col] = None
             df.at[i, response_col] = None
             df.at[i, freq_col] = None
+            # still initialise disruptions to "n"
+            annotate_row_disruptions_for_df(df, i)
 
+    # Local backfill for missing values
     needs_local = df[value_col].isnull()
     if needs_local.any():
         local_df, _ = fill_schema_locally(schema_path, transcript_text)
         local_qcol = detect_question_column(local_df)
-        local_value_col = next((c for c in local_df.columns if str(c).strip().lower() == "value"), "value")
-        local_quote_col = next((c for c in local_df.columns if str(c).strip().lower() == "quote"), "quote")
-        local_response_col = next((c for c in local_df.columns if str(c).strip().lower() == "response_code"), "response_code")
-        local_freq_col = next((c for c in local_df.columns if str(c).strip().lower() == "frequency_code"), "frequency_code")
+        local_value_col = next(
+            (c for c in local_df.columns if str(c).strip().lower() == "value"),
+            "value",
+        )
+        local_quote_col = next(
+            (c for c in local_df.columns if str(c).strip().lower() == "quote"),
+            "quote",
+        )
+        local_response_col = next(
+            (c for c in local_df.columns if str(c).strip().lower() == "response_code"),
+            "response_code",
+        )
+        local_freq_col = next(
+            (c for c in local_df.columns if str(c).strip().lower() == "frequency_code"),
+            "frequency_code",
+        )
+        # Local disruption columns
+        local_disruption_cols = {
+            k: k for k in DISRUPTION_INTERNAL_KEYS
+        } | DISRUPTION_EXPORT_COLS
+
         local_map = {}
         for _, r in local_df.iterrows():
             k = str(r.get(local_qcol, "") or "").strip()
             if k:
                 local_map[k] = r
+
         for i, row in df[needs_local].iterrows():
             k = str(row.get(qcol, "") or "").strip()
             lr = local_map.get(k)
@@ -335,11 +668,19 @@ def fill_schema_with_gemini_then_local(schema_path: Path, transcript_text: str, 
                 df.at[i, quote_col] = lr.get(local_quote_col) or ""
                 df.at[i, response_col] = lr.get(local_response_col) or ""
                 df.at[i, freq_col] = lr.get(local_freq_col) or ""
+                # copy disruption flags from local_df too, if present
+                for col_name in local_disruption_cols.keys():
+                    if col_name in local_df.columns:
+                        df.at[i, col_name] = lr.get(col_name, "n")
+                    else:
+                        df.at[i, col_name] = "n"
             else:
                 df.at[i, value_col] = ""
                 df.at[i, quote_col] = ""
                 df.at[i, response_col] = "NA"
                 df.at[i, freq_col] = "NA"
+                # default disruption flags when everything failed
+                annotate_row_disruptions_for_df(df, i)
 
     out_path = write_output(df, schema_path)
     return df, out_path
